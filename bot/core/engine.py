@@ -435,10 +435,16 @@ class Engine:
                     await asyncio.sleep(_DISCONNECTED_RETRY_INTERVAL)
                     continue
                 if not config.disable_auto_tp:
-                    if not self._scheduler.is_spread_hour():
-                        await self._tp.run_cycle(self._mt5, self._sqlite, config)
-                    else:
-                        await self._tp.run_cycle(self._mt5, self._sqlite, config, crypto_only=True)
+                    # Signals the TM has auto-TP'd, kept current by the sync loop off its
+                    # existing status snapshot — the trigger when follow_server_tp is on.
+                    server_tp = self._sync_cycle.server_tp_signals
+                    await self._tp.run_cycle(
+                        self._mt5,
+                        self._sqlite,
+                        config,
+                        crypto_only=self._scheduler.is_spread_hour(),
+                        server_tp_signals=server_tp,
+                    )
                 if self._tp_finalizer is not None:
                     await self._tp_finalizer.sweep(self._mt5, self._sqlite, config)
             except Exception:

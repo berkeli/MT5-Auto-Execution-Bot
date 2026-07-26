@@ -249,6 +249,10 @@ class SyncCycle:
         # DB instruments whose feed has gone dark and already been warned about — cleared
         # when the feed recovers so the warning fires once per dark episode, not per cycle.
         self._logged_dark_feeds: set[str] = set()
+        # Signals the TM has auto-TP'd, read by the TP engine when the user enables
+        # tp_config.follow_server_tp. Derived from the force-exit status snapshot, so it
+        # costs no extra egress; preserved across a Supabase blip like that snapshot is.
+        self.server_tp_signals: set[int] = set()
         # Snapshots read by DashboardCache to render unplaced "watching" signals.
         # Preserved across Supabase outages so the UI doesn't blank out.
         self.last_supabase_rows: list | None = None
@@ -1850,9 +1854,20 @@ class SyncCycle:
         filled_sids = {r["signal_id"] for r in filled_rows} - unmanaged_sids
         if not filled_sids:
             self._last_signal_status.clear()
+            self.server_tp_signals = set()
             return
 
         status_map = await self._filled_statuses(supabase, filled_sids)
+
+        # Auto-TP'd signals for the TP engine's follow-server mode. Manual 'profit' is
+        # excluded: the force-exit pass below closes those outright, whole position.
+        self.server_tp_signals = {
+            sid
+            for sid in filled_sids
+            if (entry := status_map.get(sid)) is not None
+            and entry["status"] == "profit"
+            and entry.get("closed_reason") != "manual"
+        }
 
         pos_by_ticket = {p.ticket: p for p in mt5_positions}
         all_filled_rows = filled_rows

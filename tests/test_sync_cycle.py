@@ -1324,6 +1324,33 @@ async def test_auto_tp_profit_position_kept_open_on_weekday(
     assert {r["mt5_ticket"] for r in await sqlite_db.get_filled_positions()} == {9401}
 
 
+async def test_server_tp_signals_holds_auto_tp_only(sqlite_db, mock_mt5, sample_config) -> None:
+    # The TP engine's follow-server trigger set, taken off the force-exit status
+    # snapshot (no extra egress). Manual 'profit' is force-closed outright, so it must
+    # never also arrive as a TP trigger.
+    await _insert_filled(sqlite_db, mt5_ticket=9501, signal_id=1, symbol="USDCAD")
+    await _insert_filled(sqlite_db, mt5_ticket=9502, signal_id=2, symbol="EURUSD")
+    mock_mt5.positions_get.return_value = [
+        make_position(ticket=9501, symbol="USDCAD"),
+        make_position(ticket=9502, symbol="EURUSD"),
+    ]
+    mock_mt5.close_position.return_value = make_order_result(ticket=9502)
+
+    supabase = _mock_supabase(signals=[])
+    supabase.fetch_signal_statuses.return_value = {
+        1: {"status": "profit", "closed_reason": "automatic"},
+        2: {"status": "profit", "closed_reason": "manual"},
+        3: {"status": "profit", "closed_reason": "automatic"},  # not held locally
+    }
+    scheduler = _mock_scheduler(cancel_pending=False)
+    scheduler.is_weekend_window.return_value = False
+
+    cycle = SyncCycle()
+    await cycle.run(supabase, sqlite_db, mock_mt5, sample_config, scheduler)
+
+    assert cycle.server_tp_signals == {1}
+
+
 # ---------------------------------------------------------------------------
 # Cancel force-exit: 'near_miss' and 'manual' cancels close immediately on any
 # day / asset class; 'expiry' stays gated to the weekend/crypto window because

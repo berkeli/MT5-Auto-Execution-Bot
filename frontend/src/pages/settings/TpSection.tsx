@@ -10,6 +10,9 @@ interface Props {
   tpRows: TpRow[]
   tpTab: 'standard' | OverrideType
   setTpTab: (v: 'standard' | OverrideType) => void
+  followServerTp: boolean
+  setFollowServerTp: (fn: (v: boolean) => boolean) => void
+  touch: () => void
   instrumentOverrides: Record<AssetKey, InstrumentOverrideRow[]>
   expandedAsset: AssetKey | null
   setExpandedAsset: (v: AssetKey | null) => void
@@ -43,6 +46,9 @@ export function TpSection({
   tpRows,
   tpTab,
   setTpTab,
+  followServerTp,
+  setFollowServerTp,
+  touch,
   instrumentOverrides,
   expandedAsset,
   setExpandedAsset,
@@ -54,6 +60,8 @@ export function TpSection({
   removeInstrumentOverride,
 }: Props) {
   if (tpRows.length === 0) return null
+  // Thresholds go unused in follow-server mode — dim them so the setting's effect is visible.
+  const thrStyle = { width: 76, opacity: followServerTp ? 0.4 : 1 }
   return (
     <CollapsibleSection
       head={
@@ -75,6 +83,35 @@ export function TpSection({
       open={open}
       onToggle={onToggle}
     >
+      <label
+        style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 10,
+          cursor: 'pointer',
+          marginBottom: 18,
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={followServerTp}
+          onChange={() => {
+            setFollowServerTp(v => !v)
+            touch()
+          }}
+          style={{ accentColor: 'var(--accent)', width: 16, height: 16, marginTop: 2 }}
+        />
+        <span style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <span style={{ fontSize: 13.5, fontWeight: 600 }}>Follow server TP</span>
+          <span className="faint" style={{ fontSize: 12.5, maxWidth: 560 }}>
+            Take profit the moment the alert channel calls TP, instead of when your own threshold is
+            reached — so a trade closes with the signal even if your fills or broker prices differ.
+            Only the trigger changes: the trail distances and trailing % below still apply, and the
+            thresholds are ignored.
+          </span>
+        </span>
+      </label>
+
       <div style={{ marginBottom: 16 }}>
         <Seg
           accent
@@ -136,7 +173,7 @@ export function TpSection({
                         <input
                           className="inp num mono"
                           value={t.thr}
-                          style={{ width: 76 }}
+                          style={thrStyle}
                           onChange={e => updateTpStandard(i, 'thr', e.target.value)}
                         />
                       </td>
@@ -383,7 +420,7 @@ export function TpSection({
                         <input
                           className="inp num mono"
                           value={t.overrides[tpTab].thr}
-                          style={{ width: 76 }}
+                          style={thrStyle}
                           onChange={e => updateTpOverride(i, tpTab, 'thr', e.target.value)}
                         />
                       </td>

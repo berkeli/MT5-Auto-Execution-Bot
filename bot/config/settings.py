@@ -390,6 +390,11 @@ class RiskyConfig(BaseModel):
 
 
 class TPConfig(BaseModel):
+    # When true the signal service becomes the TP trigger authority: instead of the
+    # per-asset profit_threshold below, a position takes profit the moment its signal
+    # flips to 'profit' (closed_reason 'automatic') in the DB. Only the trigger changes —
+    # trailing distance, partial close %, and every other exit path stay as configured.
+    follow_server_tp: bool = False
     partial_close_percent: int = 0
     forex: AssetTPConfig
     forex_jpy: AssetTPConfig

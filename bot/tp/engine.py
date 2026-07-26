@@ -56,6 +56,7 @@ class TPEngine:
         sqlite: SQLiteDB,
         config: Settings,
         crypto_only: bool = False,
+        server_tp_signals: set[int] | None = None,
     ) -> None:
         mt5_pos_map = {p.ticket: p for p in mt5_client.positions_get()}
         sqlite_rows = await sqlite.get_filled_positions()
@@ -102,6 +103,7 @@ class TPEngine:
                     config,
                     mt5_account_login,
                     excursions,
+                    server_tp_signals or set(),
                 )
             except Exception:
                 logger.error("TPEngine: unhandled error signal=%d", signal_id, exc_info=True)
@@ -149,6 +151,7 @@ class TPEngine:
         config: Settings,
         mt5_account_login: int | None = None,
         excursions: dict[int, tuple[float, float]] | None = None,
+        server_tp_signals: set[int] | None = None,
     ) -> None:
         trailing_rows = [r for r in rows if r["is_trailing"]]
         non_trailing_rows = [r for r in rows if not r["is_trailing"]]
@@ -172,7 +175,9 @@ class TPEngine:
 
         if non_trailing_rows:
             positions = [mt5_pos_map[r["mt5_ticket"]] for r in non_trailing_rows]
-            if self._strategy.should_trigger(positions, asset_cfg, mt5_client):
+            if self._triggered(
+                signal_id, positions, asset_cfg, mt5_client, config, server_tp_signals
+            ):
                 result = await self._strategy.execute(
                     signal_id, positions, asset_cfg, mt5_client, sqlite
                 )
@@ -198,6 +203,27 @@ class TPEngine:
                         mt5_client,
                         excursions or {},
                     )
+
+    def _triggered(
+        self,
+        signal_id: int,
+        positions: list[PositionInfo],
+        asset_cfg,
+        mt5_client: MT5Client,
+        config: Settings,
+        server_tp_signals: set[int] | None,
+    ) -> bool:
+        """Follow-server mode swaps the local profit threshold for the signal service's
+        own auto-TP call (signals.status 'profit' + closed_reason 'automatic', surfaced by
+        the sync cycle) so a user exits when the channel says TP regardless of how their
+        broker's fills and prices differ. Nothing past the trigger changes — partial close,
+        trailing, and the pending-limit teardown run exactly as in threshold mode."""
+        if config.tp_config.follow_server_tp:
+            if signal_id not in (server_tp_signals or ()):
+                return False
+            logger.info("TP triggered by server: signal=%d positions=%d", signal_id, len(positions))
+            return True
+        return self._strategy.should_trigger(positions, asset_cfg, mt5_client)
 
     async def _record_outcome(
         self,
@@ -285,6 +311,7 @@ class TPEngine:
                 r_multiple=r_multiple,
                 risk_percent_cfg=_resolve_risk_percent(config, first_pos.symbol),
                 bot_version=BOT_VERSION,
+                tp_strategy="follow_server" if config.tp_config.follow_server_tp else "default",
                 notes={"non_trailing_count": len(non_trailing_rows)},
                 stage="trigger",
                 mfe_price=mfe_price,

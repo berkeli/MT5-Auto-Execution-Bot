@@ -77,6 +77,20 @@ TPEngine (engine.py)
 1. Most-recently-filled position (highest ticket#) moved >= `profit_threshold`
 2. Combined P&L of ALL OTHER positions for same signal >= 0
 
+### Follow Server TP (`tp_config.follow_server_tp`, off by default)
+Replaces both conditions above with the signal service's own call: the group takes profit
+as soon as its signal is `status='profit'` + `closed_reason='automatic'` in Supabase. Users
+whose fills or broker prices differ from the TM feed then exit *with* the alert instead of
+waiting on a threshold their broker may never print. Nothing after the trigger changes —
+partial close, trailing, pending-limit teardown, `signal_tp_fired`, and the outcome rows
+(tagged `tp_strategy='follow_server'`) behave identically.
+
+The signal set costs no extra egress: `SyncCycle._check_forced_exits` already fetches
+statuses for every locally-filled signal behind the rev-gated cache, so it publishes the
+auto-TP'd ids on `SyncCycle.server_tp_signals` and `_tp_loop` hands that set to
+`TPEngine.run_cycle`. Manual `profit` is excluded — that path force-closes the whole
+position (see below) rather than running a TP.
+
 ### On Trigger
 - Earlier positions: close 100% at market
 - Newest position: close `partial_close_percent`% at market

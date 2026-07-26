@@ -109,6 +109,7 @@ export function SettingsPage({ config, status, connected, onConfigSaved }: Props
   const [excludedChannelAssets, setExcludedChannelAssets] = useState<ExcludedChannelAssetRow[]>([])
   const [disabledSignalTypes, setDisabledSignalTypes] = useState<string[]>([])
   const [disabledChannels, setDisabledChannels] = useState<string[]>([])
+  const [followServerTp, setFollowServerTp] = useState(false)
   const [disableAutoTp, setDisableAutoTp] = useState(false)
   const [volatilityGuard, setVolatilityGuard] = useState(false)
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>(() => {
@@ -357,6 +358,7 @@ export function SettingsPage({ config, status, connected, onConfigSaved }: Props
     )
     setDisabledSignalTypes(cfg.disabled_signal_types ?? [])
     setDisabledChannels(cfg.disabled_channels ?? [])
+    setFollowServerTp(cfg.tp_config?.follow_server_tp ?? false)
     setDisableAutoTp(cfg.disable_auto_tp ?? false)
     setVolatilityGuard(cfg.volatility_guard ?? false)
   }, [])
@@ -786,6 +788,7 @@ export function SettingsPage({ config, status, connected, onConfigSaved }: Props
       ...config!.tp_config,
       ...assetEntries,
       ...overrideMaps,
+      follow_server_tp: followServerTp,
       one_to_one: oneToOne,
       risky,
       instrument_overrides: buildInstrumentOverrides(),
@@ -1310,6 +1313,9 @@ export function SettingsPage({ config, status, connected, onConfigSaved }: Props
         tpRows={tpRows}
         tpTab={tpTab}
         setTpTab={setTpTab}
+        followServerTp={followServerTp}
+        setFollowServerTp={setFollowServerTp}
+        touch={touch}
         instrumentOverrides={instrumentOverrides}
         expandedAsset={expandedAsset}
         setExpandedAsset={setExpandedAsset}

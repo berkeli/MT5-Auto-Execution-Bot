@@ -165,6 +165,7 @@
     }
   },
   "tp_config": {
+    "follow_server_tp": false,
     "partial_close_percent": 0,
     "forex": {
       "profit_threshold": 10.0,

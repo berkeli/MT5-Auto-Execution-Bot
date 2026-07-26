@@ -299,3 +299,79 @@ async def test_run_cycle_records_trigger_outcome(sqlite_db, mock_mt5, sample_con
 
     # The signal is durably marked TP-fired so its siblings never re-place.
     assert 7 in await sqlite_db.get_tp_fired_signals()
+
+
+# ---------------------------------------------------------------------------
+# follow_server_tp — the signal service's auto-TP call replaces the threshold
+# ---------------------------------------------------------------------------
+
+
+async def _insert_below_threshold_gold(sqlite_db, mock_mt5) -> None:
+    # XAUUSD long: entry 4459, bid 4460 → move 1.0, well under the metals threshold 4.0.
+    pos = make_position(
+        ticket=1001, symbol="XAUUSD", price_open=4459.0, volume=0.3, type=0, profit=2.0
+    )
+    mock_mt5.positions_get.return_value = [pos]
+    mock_mt5.symbol_info_tick.return_value = make_tick(symbol="XAUUSD", bid=4460.0, ask=4460.2)
+    mock_mt5.symbol_info.return_value = make_symbol_info(
+        name="XAUUSD", digits=2, point=0.01, volume_step=0.01, volume_min=0.01
+    )
+    mock_mt5.account_info.return_value = make_account_info()
+    mock_mt5.close_position.return_value = make_order_result(ticket=1001)
+
+    await sqlite_db.insert_order(
+        limit_id=1,
+        signal_id=7,
+        mt5_ticket=1001,
+        order_type="buy_limit",
+        lot_size=0.3,
+        placed_at="2026-01-01T00:00:00+00:00",
+        db_stop_loss=4440.0,
+        signal_type="standard",
+        mt5_price=4459.0,
+        symbol="XAUUSD",
+        sequence_number=1,
+    )
+    await sqlite_db.mark_filled(1001, "2026-01-01T00:01:00+00:00")
+
+
+async def test_follow_server_tp_fires_below_local_threshold(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    await _insert_below_threshold_gold(sqlite_db, mock_mt5)
+    sample_config.tp_config.follow_server_tp = True
+
+    engine = TPEngine()
+    # Server hasn't called TP yet — the local threshold no longer applies either way.
+    await engine.run_cycle(mock_mt5, sqlite_db, sample_config, server_tp_signals=set())
+    mock_mt5.close_position.assert_not_called()
+
+    await engine.run_cycle(mock_mt5, sqlite_db, sample_config, server_tp_signals={7})
+
+    # Partial close (50% of 0.3) then trail the remainder — same execution as a
+    # threshold trigger, and the signal is marked so its siblings never re-place.
+    mock_mt5.close_position.assert_called_once()
+    assert mock_mt5.close_position.call_args.kwargs["volume"] == pytest.approx(0.15)
+    assert [r["mt5_ticket"] for r in await sqlite_db.get_trailing_positions()] == [1001]
+    assert 7 in await sqlite_db.get_tp_fired_signals()
+
+
+async def test_server_tp_ignored_when_follow_disabled(sqlite_db, mock_mt5, sample_config) -> None:
+    await _insert_below_threshold_gold(sqlite_db, mock_mt5)
+
+    engine = TPEngine()
+    await engine.run_cycle(mock_mt5, sqlite_db, sample_config, server_tp_signals={7})
+
+    mock_mt5.close_position.assert_not_called()
+
+
+async def test_follow_server_tp_tags_outcome_strategy(sqlite_db, mock_mt5, sample_config) -> None:
+    await _insert_below_threshold_gold(sqlite_db, mock_mt5)
+    sample_config.tp_config.follow_server_tp = True
+
+    writer = AsyncMock()
+    engine = TPEngine(outcomes_writer=writer)
+    await engine.run_cycle(mock_mt5, sqlite_db, sample_config, server_tp_signals={7})
+
+    writer.record.assert_awaited_once()
+    assert writer.record.await_args.args[0].tp_strategy == "follow_server"
