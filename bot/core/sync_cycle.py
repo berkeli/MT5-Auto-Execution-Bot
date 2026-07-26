@@ -1779,6 +1779,7 @@ class SyncCycle:
         comment: str,
         label: str,
         fail_counts: dict[int, int] | None,
+        close_reason: str | None = None,
     ) -> str:
         """Stop trailing and market-close one tracked position.
 
@@ -1808,7 +1809,7 @@ class SyncCycle:
             realized_pnl = mt5_client.get_position_realized_pnl(ticket)
             if realized_pnl is None:
                 realized_pnl = pos.profit
-            await sqlite.mark_closed(ticket, realized_pnl)
+            await sqlite.mark_closed(ticket, realized_pnl, close_reason)
             self._closed_tickets.add(ticket)
             if fail_counts is not None:
                 fail_counts.pop(ticket, None)
@@ -1967,6 +1968,7 @@ class SyncCycle:
                     comment=f"force_{current}",
                     label="Forced exit",
                     fail_counts=self._force_exit_fail_count,
+                    close_reason="breakeven" if current == "breakeven" else None,
                 )
                 if outcome == "failed":
                     all_handled = False

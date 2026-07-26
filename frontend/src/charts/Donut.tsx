@@ -1,37 +1,59 @@
 import { useState, useEffect } from 'react'
 
+export interface DonutSegment {
+  value: number
+  color: string
+}
+
 interface DonutProps {
-  pct: number
+  segments: DonutSegment[]
+  label: string
+  caption: string
   size?: number
   strokeW?: number
 }
 
-export function Donut({ pct, size = 160, strokeW = 13 }: DonutProps) {
+export function Donut({ segments, label, caption, size = 160, strokeW = 13 }: DonutProps) {
   const r = size / 2 - strokeW / 2 - 2
   const c = size / 2
   const circ = 2 * Math.PI * r
-  const [draw, setDraw] = useState(0)
+  const [draw, setDraw] = useState(false)
 
   useEffect(() => {
-    const t = setTimeout(() => setDraw(pct), 60)
+    const t = setTimeout(() => setDraw(true), 60)
     return () => clearTimeout(t)
-  }, [pct])
+  }, [])
+
+  const total = segments.reduce((s, seg) => s + seg.value, 0)
+  const drawn = segments.filter(seg => seg.value > 0)
+
+  let offset = 0
+  const arcs = drawn.map(seg => {
+    const len = total > 0 ? (seg.value / total) * circ : 0
+    const arc = { color: seg.color, len, offset }
+    offset += len
+    return arc
+  })
 
   return (
     <svg viewBox={`0 0 ${size} ${size}`} style={{ width: size, height: size }}>
       <circle cx={c} cy={c} r={r} fill="none" stroke="var(--surface-3)" strokeWidth={strokeW} />
-      <circle
-        cx={c}
-        cy={c}
-        r={r}
-        fill="none"
-        stroke="var(--accent)"
-        strokeWidth={strokeW}
-        strokeLinecap="round"
-        strokeDasharray={`${(draw / 100) * circ} ${circ}`}
-        transform={`rotate(-90 ${c} ${c})`}
-        style={{ transition: 'stroke-dasharray 1s cubic-bezier(.4,0,.2,1)' }}
-      />
+      {arcs.map((a, i) => (
+        <circle
+          key={i}
+          cx={c}
+          cy={c}
+          r={r}
+          fill="none"
+          stroke={a.color}
+          strokeWidth={strokeW}
+          strokeLinecap={arcs.length > 1 ? 'butt' : 'round'}
+          strokeDasharray={`${draw ? a.len : 0} ${circ}`}
+          strokeDashoffset={-a.offset}
+          transform={`rotate(-90 ${c} ${c})`}
+          style={{ transition: 'stroke-dasharray 1s cubic-bezier(.4,0,.2,1)' }}
+        />
+      ))}
       <text
         x={c}
         y={c - 2}
@@ -41,7 +63,7 @@ export function Donut({ pct, size = 160, strokeW = 13 }: DonutProps) {
         fill="var(--text)"
         fontFamily="var(--font)"
       >
-        {Math.round(pct)}%
+        {label}
       </text>
       <text
         x={c}
@@ -52,7 +74,7 @@ export function Donut({ pct, size = 160, strokeW = 13 }: DonutProps) {
         fontFamily="var(--font)"
         letterSpacing="0.06em"
       >
-        WIN RATE
+        {caption}
       </text>
     </svg>
   )

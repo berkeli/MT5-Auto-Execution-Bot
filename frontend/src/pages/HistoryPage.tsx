@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import { fetchHistory, clearHistory } from '../api'
 import { Seg } from '../components/Seg'
 import { money } from '../utils/money'
-import { computeDetailedStats, formatHoldTime } from '../utils/stats'
+import { computeDetailedStats, formatHoldTime, outcomeOf } from '../utils/stats'
 import { directionFromOrderType } from '../utils/orderType'
 import { badgeClassFor, formatSignalType } from '../utils/signalType'
 import type { HistoryData, SignalType, TradeData } from '../types'
@@ -36,6 +36,7 @@ interface SignalGroup {
   tradeCount: number
   closedAt: string
   status: string
+  breakeven: boolean
   channelId: string | null
   signalType: SignalType
 }
@@ -50,6 +51,7 @@ function tradeToGroup(t: TradeData): SignalGroup {
     tradeCount: t.fills_count + t.cancelled_count,
     closedAt: t.closed_at || t.filled_at || t.placed_at,
     status: t.status,
+    breakeven: t.status === 'closed' && outcomeOf(t) === 'breakeven',
     channelId: t.channel_id,
     signalType: (t.signal_type ?? 'standard') as SignalType,
   }
@@ -287,7 +289,8 @@ export function HistoryPage() {
               'Win rate',
               `${detailedStats.winRate.toFixed(0)}%`,
               '',
-              `${detailedStats.wins} W · ${detailedStats.losses} L`
+              `${detailedStats.wins} W · ${detailedStats.losses} L` +
+                (detailedStats.breakevens > 0 ? ` · ${detailedStats.breakevens} BE` : '')
             )}
             {stat(
               'Profit factor',
@@ -316,19 +319,31 @@ export function HistoryPage() {
             {stat(
               'Best trade',
               money(detailedStats.bestTrade.pnl),
-              'pos',
+              detailedStats.bestTrade.pnl >= 0 ? 'pos' : 'neg',
               detailedStats.bestTrade.symbol,
               true
             )}
             {stat(
               'Worst trade',
               money(detailedStats.worstTrade.pnl),
-              'neg',
+              detailedStats.worstTrade.pnl > 0 ? 'pos' : 'neg',
               detailedStats.worstTrade.symbol,
               true
             )}
-            {stat('Win streak', String(detailedStats.winStreak), '', undefined, true)}
-            {stat('Loss streak', String(detailedStats.lossStreak), '', undefined, true)}
+            {stat(
+              'Longest streak',
+              `${detailedStats.bestStreak}W · ${detailedStats.worstStreak}L`,
+              '',
+              'consecutive, best and worst',
+              true
+            )}
+            {stat(
+              'Breakeven',
+              String(detailedStats.breakevens),
+              '',
+              'excluded from win rate',
+              true
+            )}
             {stat(
               'Avg hold',
               formatHoldTime(detailedStats.avgHoldMinutes),
@@ -389,14 +404,18 @@ export function HistoryPage() {
                     )}
                   </td>
                   <td>
-                    {g.status === 'closed' ? (
+                    {g.breakeven ? (
+                      <span className="tag ghost">breakeven</span>
+                    ) : g.status === 'closed' ? (
                       <span className="tag trail">closed</span>
                     ) : (
                       <span className="tag ghost">{g.status}</span>
                     )}
                   </td>
                   <td
-                    className={`num mono ${g.totalPnl > 0 ? 'pos' : g.totalPnl < 0 ? 'neg' : 'faint'}`}
+                    className={`num mono ${
+                      g.breakeven || g.totalPnl === 0 ? 'faint' : g.totalPnl > 0 ? 'pos' : 'neg'
+                    }`}
                     style={{ fontWeight: 600 }}
                   >
                     {g.totalPnl === 0 ? '—' : money(g.totalPnl)}

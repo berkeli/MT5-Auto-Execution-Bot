@@ -88,7 +88,8 @@ CREATE TABLE IF NOT EXISTS order_mappings (
     mfe_price               REAL NOT NULL DEFAULT 0,
     mae_price               REAL NOT NULL DEFAULT 0,
     fill_price              REAL,
-    exit_slippage_points    REAL
+    exit_slippage_points    REAL,
+    close_reason            TEXT
 )
 """
 
@@ -113,7 +114,8 @@ UPDATE order_mappings SET status = ?, cancelled_at = ? WHERE mt5_ticket = ?
 """
 
 MARK_CLOSED = """
-UPDATE order_mappings SET status = 'closed', cancelled_at = datetime('now'), realized_pnl = ? WHERE mt5_ticket = ?
+UPDATE order_mappings SET status = 'closed', cancelled_at = datetime('now'), realized_pnl = ?,
+    close_reason = ? WHERE mt5_ticket = ?
 """
 
 SET_TRAILING = """
@@ -392,7 +394,8 @@ SELECT
     MIN(channel_id)    AS channel_id,
     COUNT(*)           AS fills_count,
     SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_count,
-    SUM(CASE WHEN status IN ('cancelled', 'spread_cancelled') THEN 1 ELSE 0 END) AS cancelled_count
+    SUM(CASE WHEN status IN ('cancelled', 'spread_cancelled') THEN 1 ELSE 0 END) AS cancelled_count,
+    MAX(CASE WHEN close_reason = 'breakeven' THEN 1 ELSE 0 END) AS breakeven_count
 FROM order_mappings
 WHERE status IN ('closed', 'cancelled', 'spread_cancelled')
   AND placed_at >= ? AND placed_at <= ?
@@ -463,17 +466,22 @@ INSERT_TP_OUTCOME = (
 # SQLite — aggregated lifetime stats across all closed signals.
 # Treats one signal_id as one trade (matches the History view); pnl is the
 # sum of realized_pnl across all closed limits for that signal.
+# Breakeven signals (the TM flattened them at entry) are counted and P&L-summed but
+# never scored as a win or a loss — see the same rule in /api/history.
 GET_USER_STATS = """
 WITH signal_pnl AS (
-    SELECT signal_id, SUM(COALESCE(realized_pnl, 0)) AS pnl
+    SELECT
+        signal_id,
+        SUM(COALESCE(realized_pnl, 0)) AS pnl,
+        MAX(CASE WHEN close_reason = 'breakeven' THEN 1 ELSE 0 END) AS is_breakeven
     FROM order_mappings
     WHERE status = 'closed'
     GROUP BY signal_id
 )
 SELECT
     COUNT(*) AS total_trades,
-    COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) AS wins,
-    COALESCE(SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END), 0) AS losses,
+    COALESCE(SUM(CASE WHEN is_breakeven = 0 AND pnl > 0 THEN 1 ELSE 0 END), 0) AS wins,
+    COALESCE(SUM(CASE WHEN is_breakeven = 0 AND pnl < 0 THEN 1 ELSE 0 END), 0) AS losses,
     COALESCE(SUM(pnl), 0) AS total_pnl
 FROM signal_pnl
 """

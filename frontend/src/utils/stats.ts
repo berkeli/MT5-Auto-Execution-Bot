@@ -1,27 +1,63 @@
 import type { TradeData } from '../types'
 
-export interface DetailedStats {
-  netPnl: number
-  winRate: number
+export type Outcome = 'win' | 'loss' | 'breakeven'
+
+/** A signal the TM flattened at breakeven scores neither win nor loss — its residual
+ * P&L is spread/commission, not a directional result. An exactly-flat close is
+ * treated the same so it can't sit in the win-rate denominator as a phantom loss. */
+export function outcomeOf(t: TradeData): Outcome {
+  if (t.breakeven || t.total_pnl === 0) return 'breakeven'
+  return t.total_pnl > 0 ? 'win' : 'loss'
+}
+
+export interface WinLossCounts {
   wins: number
   losses: number
+  breakevens: number
+  winRate: number
+}
+
+export function countOutcomes(trades: TradeData[]): WinLossCounts {
+  let wins = 0,
+    losses = 0,
+    breakevens = 0
+  for (const t of trades) {
+    if (t.status !== 'closed') continue
+    const o = outcomeOf(t)
+    if (o === 'win') wins++
+    else if (o === 'loss') losses++
+    else breakevens++
+  }
+  const decided = wins + losses
+  return { wins, losses, breakevens, winRate: decided > 0 ? (wins / decided) * 100 : 0 }
+}
+
+export interface DetailedStats extends WinLossCounts {
+  netPnl: number
   profitFactor: number
   expectancy: number
   avgWin: number
   avgLoss: number
   bestTrade: { pnl: number; symbol: string }
   worstTrade: { pnl: number; symbol: string }
-  winStreak: number
-  lossStreak: number
+  bestStreak: number
+  worstStreak: number
   avgHoldMinutes: number
   scalpShare: number
   totalTrades: number
 }
 
+function closeTime(t: TradeData): string {
+  return t.closed_at || t.filled_at || t.placed_at
+}
+
 export function computeDetailedStats(trades: TradeData[]): DetailedStats {
-  const closed = trades.filter(t => t.status === 'closed')
-  const wins = closed.filter(t => t.total_pnl > 0)
-  const losses = closed.filter(t => t.total_pnl < 0)
+  const closed = trades
+    .filter(t => t.status === 'closed')
+    .sort((a, b) => closeTime(a).localeCompare(closeTime(b)))
+  const counts = countOutcomes(closed)
+  const wins = closed.filter(t => outcomeOf(t) === 'win')
+  const losses = closed.filter(t => outcomeOf(t) === 'loss')
 
   const grossWin = wins.reduce((s, t) => s + t.total_pnl, 0)
   const grossLoss = Math.abs(losses.reduce((s, t) => s + t.total_pnl, 0))
@@ -36,26 +72,30 @@ export function computeDetailedStats(trades: TradeData[]): DetailedStats {
     { pnl: Infinity, symbol: '' }
   )
 
-  let winStreak = 0,
-    lossStreak = 0,
+  // Longest run of each outcome, chronologically. Breakevens are transparent —
+  // they neither extend nor break a run.
+  let bestStreak = 0,
+    worstStreak = 0,
     curWin = 0,
     curLoss = 0
   for (const t of closed) {
-    if (t.total_pnl > 0) {
+    const o = outcomeOf(t)
+    if (o === 'breakeven') continue
+    if (o === 'win') {
       curWin++
       curLoss = 0
-    } else if (t.total_pnl < 0) {
+    } else {
       curLoss++
       curWin = 0
     }
-    winStreak = Math.max(winStreak, curWin)
-    lossStreak = Math.max(lossStreak, curLoss)
+    bestStreak = Math.max(bestStreak, curWin)
+    worstStreak = Math.max(worstStreak, curLoss)
   }
 
   let totalHold = 0,
     holdCount = 0
   for (const t of closed) {
-    const closeTs = t.closed_at || t.filled_at || t.placed_at
+    const closeTs = closeTime(t)
     if (t.filled_at && closeTs) {
       const ms = new Date(closeTs).getTime() - new Date(t.filled_at).getTime()
       if (ms > 0) {
@@ -68,18 +108,16 @@ export function computeDetailedStats(trades: TradeData[]): DetailedStats {
   const scalps = closed.filter(t => t.signal_type === 'scalp').length
 
   return {
+    ...counts,
     netPnl,
-    winRate: closed.length > 0 ? (wins.length / closed.length) * 100 : 0,
-    wins: wins.length,
-    losses: losses.length,
     profitFactor: grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? Infinity : 0,
     expectancy: closed.length > 0 ? netPnl / closed.length : 0,
     avgWin: wins.length > 0 ? grossWin / wins.length : 0,
-    avgLoss: losses.length > 0 ? grossLoss / losses.length : 0,
+    avgLoss: losses.length > 0 ? -(grossLoss / losses.length) : 0,
     bestTrade: best.pnl === -Infinity ? { pnl: 0, symbol: '—' } : best,
     worstTrade: worst.pnl === Infinity ? { pnl: 0, symbol: '—' } : worst,
-    winStreak,
-    lossStreak,
+    bestStreak,
+    worstStreak,
     avgHoldMinutes: holdCount > 0 ? totalHold / holdCount / 60000 : 0,
     scalpShare: closed.length > 0 ? (scalps / closed.length) * 100 : 0,
     totalTrades: closed.length,

@@ -97,6 +97,7 @@ class SQLiteDB:
             "sl_stripped INTEGER NOT NULL DEFAULT 0",
             "fill_price REAL",
             "exit_slippage_points REAL",
+            "close_reason TEXT",
         ):
             name = col.split()[0]
             try:
@@ -204,8 +205,13 @@ class SQLiteDB:
         await self._db.execute(MARK_CANCELLED, (status, cancelled_at, mt5_ticket))
         await self._db.commit()
 
-    async def mark_closed(self, mt5_ticket: int, realized_pnl: float | None = None) -> None:
-        await self._db.execute(MARK_CLOSED, (realized_pnl, mt5_ticket))
+    async def mark_closed(
+        self,
+        mt5_ticket: int,
+        realized_pnl: float | None = None,
+        close_reason: str | None = None,
+    ) -> None:
+        await self._db.execute(MARK_CLOSED, (realized_pnl, close_reason, mt5_ticket))
         await self._db.commit()
 
     async def set_trailing(self, mt5_ticket: int, is_trailing: int = 1) -> None:

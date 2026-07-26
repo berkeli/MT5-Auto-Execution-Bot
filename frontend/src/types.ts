@@ -243,6 +243,7 @@ export interface TradeData {
   filled_at: string
   closed_at: string
   status: string
+  breakeven: boolean
   signal_type: SignalType
   total_pnl: number
   fills_count: number
@@ -254,6 +255,7 @@ export interface HistoryStats {
   total_trades: number
   wins: number
   losses: number
+  breakevens: number
   win_rate: number
   total_pnl: number
 }

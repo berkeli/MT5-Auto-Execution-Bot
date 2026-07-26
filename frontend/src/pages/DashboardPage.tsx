@@ -10,7 +10,13 @@ import { Donut } from '../charts/Donut'
 import { Bars } from '../charts/Bars'
 import { useSort } from '../hooks/useSort'
 import { money } from '../utils/money'
-import { computeCumulativePnl, computeDailyBars, filterTradesByPeriod } from '../utils/stats'
+import {
+  computeCumulativePnl,
+  computeDailyBars,
+  countOutcomes,
+  filterTradesByPeriod,
+  outcomeOf,
+} from '../utils/stats'
 import type { Period } from '../utils/stats'
 import { getChannelName } from '../utils/channels'
 import { directionFromOrderType } from '../utils/orderType'
@@ -55,10 +61,7 @@ export function DashboardPage({ dashboard, history, config, status, onNavigate }
         ? 'P&L · this week'
         : 'Cumulative P&L · all time'
 
-  const wlClosed = useMemo(() => filteredForWL.filter(t => t.status === 'closed'), [filteredForWL])
-  const wins = wlClosed.filter(t => t.total_pnl > 0).length
-  const losses = wlClosed.filter(t => t.total_pnl < 0).length
-  const winRate = wins + losses > 0 ? (wins / (wins + losses)) * 100 : 0
+  const wl = useMemo(() => countOutcomes(filteredForWL), [filteredForWL])
 
   // Positions table
   const posRows = useMemo(
@@ -115,6 +118,7 @@ export function DashboardPage({ dashboard, history, config, status, onNavigate }
         side: directionFromOrderType(t.direction),
         limitCount: t.fills_count,
         totalPnl: t.total_pnl,
+        outcome: outcomeOf(t),
         closedAt: t.closed_at || t.filled_at || t.placed_at,
       }))
       .sort((a, b) => b.closedAt.localeCompare(a.closedAt))
@@ -197,16 +201,31 @@ export function DashboardPage({ dashboard, history, config, status, onNavigate }
               gap: 16,
             }}
           >
-            <Donut pct={winRate} size={160} />
+            <Donut
+              segments={[
+                { value: wl.wins, color: 'var(--accent)' },
+                { value: wl.losses, color: 'var(--neg)' },
+                { value: wl.breakevens, color: 'var(--text-3)' },
+              ]}
+              label={`${Math.round(wl.winRate)}%`}
+              caption="WIN RATE"
+              size={160}
+            />
             <div className="legend">
               <span>
                 <i style={{ background: 'var(--accent)' }} />
-                {wins} wins
+                {wl.wins} wins
               </span>
               <span>
-                <i style={{ background: 'var(--surface-3)' }} />
-                {losses} losses
+                <i style={{ background: 'var(--neg)' }} />
+                {wl.losses} losses
               </span>
+              {wl.breakevens > 0 && (
+                <span>
+                  <i style={{ background: 'var(--text-3)' }} />
+                  {wl.breakevens} BE
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -388,7 +407,12 @@ export function DashboardPage({ dashboard, history, config, status, onNavigate }
                     <td
                       className="num mono"
                       style={{
-                        color: g.totalPnl >= 0 ? 'var(--pos)' : 'var(--neg)',
+                        color:
+                          g.outcome === 'breakeven'
+                            ? 'var(--text-3)'
+                            : g.outcome === 'win'
+                              ? 'var(--pos)'
+                              : 'var(--neg)',
                         fontWeight: 600,
                       }}
                     >

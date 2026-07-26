@@ -197,6 +197,7 @@ async def get_history(request: Request, from_date: str = "", to_date: str = "") 
     total_pnl = 0.0
     wins = 0
     losses = 0
+    breakevens = 0
 
     for row in rows:
         signal_id = row["signal_id"]
@@ -207,6 +208,10 @@ async def get_history(request: Request, from_date: str = "", to_date: str = "") 
         # Signal status: "closed" if any limit was filled-then-closed; otherwise
         # "cancelled" (the whole signal was rejected/expired before any fill).
         status = "closed" if closed_count > 0 else "cancelled"
+        # A signal the TM flattened at breakeven scores neither win nor loss: the
+        # residual P&L is spread/commission, not a directional outcome. An exactly
+        # flat close is the same — it must not sit in the win-rate denominator.
+        breakeven = status == "closed" and (bool(row["breakeven_count"]) or signal_pnl == 0)
         trades.append(
             {
                 "signal_id": signal_id,
@@ -217,6 +222,7 @@ async def get_history(request: Request, from_date: str = "", to_date: str = "") 
                 "filled_at": row["first_filled_at"] or "",
                 "closed_at": row["last_closed_at"] or "",
                 "status": status,
+                "breakeven": breakeven,
                 "signal_type": row["signal_type"],
                 "total_pnl": signal_pnl,
                 "fills_count": closed_count,
@@ -226,20 +232,23 @@ async def get_history(request: Request, from_date: str = "", to_date: str = "") 
         )
         if status == "closed":
             total_pnl += signal_pnl
-            if signal_pnl > 0:
+            if breakeven:
+                breakevens += 1
+            elif signal_pnl > 0:
                 wins += 1
             elif signal_pnl < 0:
                 losses += 1
 
-    total_trades = wins + losses
-    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+    decided = wins + losses
+    win_rate = (wins / decided * 100) if decided > 0 else 0.0
 
     return {
         "trades": trades,
         "stats": {
-            "total_trades": total_trades,
+            "total_trades": decided + breakevens,
             "wins": wins,
             "losses": losses,
+            "breakevens": breakevens,
             "win_rate": round(win_rate, 1),
             "total_pnl": round(total_pnl, 2),
         },

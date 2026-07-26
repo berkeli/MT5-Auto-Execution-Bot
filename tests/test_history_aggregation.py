@@ -69,3 +69,35 @@ async def test_history_query_groups_by_signal(sqlite_db) -> None:
     # Signal 3: pure cancel
     assert by_signal[3]["closed_count"] == 0
     assert by_signal[3]["cancelled_count"] == 1
+    assert all(r["breakeven_count"] == 0 for r in rows)
+
+
+async def test_breakeven_close_is_flagged_and_excluded_from_win_loss(sqlite_db) -> None:
+    # Signal 1: a TM breakeven flatten that landed slightly negative on spread.
+    # Signal 2: an ordinary loss of the same size.
+    for limit_id, signal_id, ticket, reason in ((11, 1, 10001, "breakeven"), (21, 2, 20001, None)):
+        await sqlite_db.insert_order(
+            limit_id=limit_id,
+            signal_id=signal_id,
+            mt5_ticket=ticket,
+            order_type="buy_limit",
+            lot_size=0.10,
+            placed_at="2026-06-01T10:00:00+00:00",
+            db_stop_loss=1.0,
+            signal_type="standard",
+            symbol="EURUSD",
+        )
+        await sqlite_db.mark_filled(ticket, "2026-06-01T11:00:00+00:00")
+        await sqlite_db.mark_closed(ticket, -1.5, reason)
+
+    rows = await sqlite_db.get_order_history("2020-01-01T00:00:00", "2099-12-31T23:59:59")
+    by_signal = {r["signal_id"]: r for r in rows}
+    assert by_signal[1]["breakeven_count"] == 1
+    assert by_signal[2]["breakeven_count"] == 0
+
+    # The breakeven's P&L still counts toward the balance, but not toward the record.
+    stats = await sqlite_db.get_user_stats()
+    assert stats["total_trades"] == 2
+    assert stats["wins"] == 0
+    assert stats["losses"] == 1
+    assert abs(stats["total_pnl"] - (-3.0)) < 1e-9
