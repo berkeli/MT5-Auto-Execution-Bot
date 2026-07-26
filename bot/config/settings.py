@@ -210,6 +210,11 @@ _MIGRATION_JP225_OFFSET = "jp225_offset_backfill_v1"
 # value) unless a correct UK100GBP entry already exists. Applied once per install.
 _MIGRATION_UK100_SYMBOL_FIX = "uk100_symbol_fix_v1"
 
+# Turn on Follow Server TP for existing installs — outcome data showed the signal
+# service's TP timing beats the local profit threshold. Forced on once; a user who
+# later unchecks it keeps it off, since the migration runs at most once per install.
+_MIGRATION_FOLLOW_SERVER_TP = "follow_server_tp_enable_v1"
+
 
 class SymbolSuffixRule(BaseModel):
     suffix: str
@@ -394,7 +399,7 @@ class TPConfig(BaseModel):
     # per-asset profit_threshold below, a position takes profit the moment its signal
     # flips to 'profit' (closed_reason 'automatic') in the DB. Only the trigger changes —
     # trailing distance, partial close %, and every other exit path stay as configured.
-    follow_server_tp: bool = False
+    follow_server_tp: bool = True
     partial_close_percent: int = 0
     forex: AssetTPConfig
     forex_jpy: AssetTPConfig
@@ -680,6 +685,15 @@ def migrate_config(path: Path = _CONFIG_PATH) -> None:
             tp["instrument_overrides"] = overrides
             data["tp_config"] = tp
         applied.append(_MIGRATION_TP_INSTRUMENT_OVERRIDES)
+        data["config_migrations"] = applied
+        changed = True
+
+    if _MIGRATION_FOLLOW_SERVER_TP not in applied:
+        tp = data.get("tp_config")
+        if isinstance(tp, dict):
+            tp["follow_server_tp"] = True
+            data["tp_config"] = tp
+        applied.append(_MIGRATION_FOLLOW_SERVER_TP)
         data["config_migrations"] = applied
         changed = True
 

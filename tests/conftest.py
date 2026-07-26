@@ -30,6 +30,9 @@ def make_settings(**overrides) -> Settings:
         # partial_close_percent=50 throughout: many tests exercise the partial-close
         # path explicitly (the shipped default is now 0 = trail full).
         tp_config=TPConfig(
+            # follow_server_tp=False: the shipped default is now True, but most TP tests
+            # exercise the local profit-threshold trigger. The follow-server tests set it True.
+            follow_server_tp=False,
             partial_close_percent=50,
             forex=AssetTPConfig(
                 profit_threshold=7, threshold_unit="pips", trailing_distance=3,

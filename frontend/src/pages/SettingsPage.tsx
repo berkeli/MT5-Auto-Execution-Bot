@@ -358,7 +358,7 @@ export function SettingsPage({ config, status, connected, onConfigSaved }: Props
     )
     setDisabledSignalTypes(cfg.disabled_signal_types ?? [])
     setDisabledChannels(cfg.disabled_channels ?? [])
-    setFollowServerTp(cfg.tp_config?.follow_server_tp ?? false)
+    setFollowServerTp(cfg.tp_config?.follow_server_tp ?? true)
     setDisableAutoTp(cfg.disable_auto_tp ?? false)
     setVolatilityGuard(cfg.volatility_guard ?? false)
   }, [])
