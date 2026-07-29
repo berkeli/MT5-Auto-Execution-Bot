@@ -7,6 +7,7 @@ from bot.config.settings import (
     _MIGRATION_INDEX_F40,
     _MIGRATION_JP225_OFFSET,
     _MIGRATION_LIVE_PRICE_INTERVAL,
+    _MIGRATION_OANDA_INDICES,
     _MIGRATION_OFFSET_BACKFILL,
     _MIGRATION_PROXIMITY_BUMP,
     _MIGRATION_RISKY_GOLD_DISABLED,
@@ -16,6 +17,10 @@ from bot.config.settings import (
     _MIGRATION_SYMBOL_MAP_BACKFILL,
     _MIGRATION_TP_INSTRUMENT_OVERRIDES,
     _MIGRATION_UK100_SYMBOL_FIX,
+    _OANDA_INDEX_DRIFT,
+    _OANDA_INDEX_OFFSETS,
+    _OANDA_INDEX_PROXIMITY,
+    _OANDA_INDEX_TP,
     _OFFSET_BACKFILL_SYMBOLS,
     _RISKY_GOLD_CHANNEL_ID,
     _STOCK_PROXIMITY_OVERRIDES,
@@ -105,8 +110,14 @@ def test_proximity_bump_sets_forex_metals_and_doubles_indices(tmp_path) -> None:
     assert prox["forex_pips"] == 15.0
     assert prox["forex_jpy_pips"] == 15.0
     assert prox["metals"] == 25.0
-    # F40 is also backfilled (its migration runs in the same pass).
-    assert prox["indices"] == {"SPX": 40.0, "NAS": 100.0, "CUSTOM": 14.0, "F40": 40.0}
+    # F40 and the OANDA indices are also backfilled (their migrations run in the same pass).
+    assert prox["indices"] == {
+        "SPX": 40.0,
+        "NAS": 100.0,
+        "CUSTOM": 14.0,
+        "F40": 40.0,
+        **_OANDA_INDEX_PROXIMITY,
+    }
     assert _MIGRATION_PROXIMITY_BUMP in _read(cfg)["config_migrations"]
 
 
@@ -615,3 +626,73 @@ def test_tp_instrument_overrides_noop_when_tp_config_absent(tmp_path) -> None:
     data = _read(cfg)
     assert "tp_config" not in data  # nothing to backfill onto; template applies at load
     assert _MIGRATION_TP_INSTRUMENT_OVERRIDES in data["config_migrations"]
+
+
+def test_oanda_indices_backfilled_when_absent(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    _write(
+        cfg,
+        {
+            # Pre-applied so the index-doubling bump doesn't skew this migration's assertions.
+            "config_migrations": [_MIGRATION_PROXIMITY_BUMP],
+            "offset_instruments": ["SPX500USD"],
+            "symbol_map": {"SPX500USD": "US500"},
+            "proximity": {"indices": {"US2000": 20.0}},
+            "offset_drift": {"indices": {"US2000": 2.0}},
+            "tp_config": {"instrument_overrides": {}},
+        },
+    )
+
+    migrate_config(cfg)
+
+    data = _read(cfg)
+    for sym in _OANDA_INDEX_OFFSETS:
+        assert sym in data["offset_instruments"]
+    assert data["symbol_map"]["AUS2000"] == "AUS200"
+    assert data["proximity"]["indices"] == {
+        "US2000": 20.0,
+        "F40": 40.0,  # backfilled by the F40 migration in the same pass
+        **_OANDA_INDEX_PROXIMITY,
+    }
+    assert data["offset_drift"]["indices"] == {"US2000": 2.0, **_OANDA_INDEX_DRIFT}
+    overrides = data["tp_config"]["instrument_overrides"]
+    assert {k: overrides[k] for k in _OANDA_INDEX_TP} == _OANDA_INDEX_TP
+    assert _MIGRATION_OANDA_INDICES in data["config_migrations"]
+
+
+def test_oanda_indices_respect_existing_values(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    custom_hk = {"default": {"profit_threshold": 40.0, "trailing_distance": 40.0}}
+    _write(
+        cfg,
+        {
+            "config_migrations": [_MIGRATION_PROXIMITY_BUMP],
+            "offset_instruments": ["HK50"],
+            "symbol_map": {"AUS2000": "AUS200.a"},
+            "proximity": {"indices": {"CHINA50": 25.0}},
+            "offset_drift": {"indices": {"CHINA50": 3.0}},
+            "tp_config": {"instrument_overrides": {"HK50": custom_hk}},
+        },
+    )
+
+    migrate_config(cfg)
+
+    data = _read(cfg)
+    assert data["offset_instruments"].count("HK50") == 1  # not duplicated
+    assert data["symbol_map"]["AUS2000"] == "AUS200.a"
+    assert data["proximity"]["indices"]["CHINA50"] == 25.0
+    assert data["offset_drift"]["indices"]["CHINA50"] == 3.0
+    assert data["tp_config"]["instrument_overrides"]["HK50"] == custom_hk
+
+
+def test_oanda_indices_is_idempotent_and_respects_removal(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    _write(cfg, {"offset_instruments": ["SPX500USD"]})
+    migrate_config(cfg)
+
+    data = _read(cfg)
+    data["offset_instruments"].remove("CHINAH")
+    _write(cfg, data)
+
+    migrate_config(cfg)
+    assert "CHINAH" not in _read(cfg)["offset_instruments"]  # not re-added

@@ -31,7 +31,8 @@
     "US30USD": "US30",
     "US2000USD": "US2000",
     "DE30EUR": "DE40",
-    "UK100GBP": "UK100"
+    "UK100GBP": "UK100",
+    "AUS2000": "AUS200"
   },
   "stock_suffix": "-24",
   "symbol_suffixes": [],
@@ -53,7 +54,12 @@
     "US2000USD",
     "DE30EUR",
     "UK100GBP",
-    "JP225"
+    "JP225",
+    "F40",
+    "AUS2000",
+    "HK50",
+    "CHINA50",
+    "CHINAH"
   ],
   "offset_drift": {
     "indices": {
@@ -65,7 +71,11 @@
       "DE30": 8.0,
       "US30": 5.0,
       "US2000": 2.0,
-      "JP225": 15.0
+      "AUS2000": 5.0,
+      "JP225": 15.0,
+      "HK50": 12.0,
+      "CHINA50": 8.0,
+      "CHINAH": 5.0
     },
     "crypto": 25.0,
     "oil": 0.15,
@@ -101,8 +111,12 @@
       "F40": 40.0,
       "US30": 100.0,
       "US2000": 20.0,
+      "AUS2000": 40.0,
       "UK100": 50.0,
-      "JP225": 200.0
+      "JP225": 200.0,
+      "HK50": 100.0,
+      "CHINA50": 60.0,
+      "CHINAH": 40.0
     },
     "stock_overrides": {
       "AAPL.NAS": 2.0,
@@ -425,6 +439,30 @@
         "standard": {
           "profit_threshold": 7.0,
           "trailing_distance": 7.0
+        }
+      },
+      "AUS2000": {
+        "default": {
+          "profit_threshold": 10.0,
+          "trailing_distance": 10.0
+        }
+      },
+      "HK50": {
+        "default": {
+          "profit_threshold": 25.0,
+          "trailing_distance": 25.0
+        }
+      },
+      "CHINA50": {
+        "default": {
+          "profit_threshold": 15.0,
+          "trailing_distance": 15.0
+        }
+      },
+      "CHINAH": {
+        "default": {
+          "profit_threshold": 10.0,
+          "trailing_distance": 10.0
         }
       },
       "JP225": {

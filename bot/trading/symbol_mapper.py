@@ -16,7 +16,10 @@ _INDEX_KEYWORDS = (
     "US30",
     "US500",
     "US2000",
+    "AUS200",
     "USTEC",
+    "HK50",
+    "CHINA",
 )
 
 
@@ -51,6 +54,14 @@ def instrument_under_news(db_symbol: str, news_symbols: frozenset[str]) -> bool:
         AssetClass.OIL,
         AssetClass.STOCKS,
     )
+
+
+def _index_lookup(table: dict[str, float], db_symbol: str) -> float | None:
+    """Longest matching keyword wins, so an entry can't be claimed by a shorter one it
+    contains — 'AUS2000' must take its own value, not 'US2000'. None = no entry."""
+    s = db_symbol.upper()
+    hits = [key for key in table if key.upper() in s]
+    return table[max(hits, key=len)] if hits else None
 
 
 def pip_size(info: SymbolInfo) -> float:
@@ -122,11 +133,7 @@ def proximity_threshold(
         return prox.stocks
 
     if asset_class == AssetClass.INDICES:
-        s = db_sym.upper()
-        for keyword, threshold in prox.indices.items():
-            if keyword.upper() in s:
-                return threshold
-        return None  # unrecognized index → no filter
+        return _index_lookup(prox.indices, db_sym)  # None = unrecognized, no filter
 
     if asset_class in (AssetClass.FOREX, AssetClass.FOREX_JPY):
         pip_sz = pip_size(info)
@@ -156,11 +163,8 @@ def offset_drift_threshold(asset_class: AssetClass, drift: OffsetDriftConfig, db
     pending offset order is re-placed. Offset instruments are non-forex, so this is
     always a dollar/point distance, never pips."""
     if asset_class == AssetClass.INDICES:
-        s = db_sym.upper()
-        for keyword, threshold in drift.indices.items():
-            if keyword.upper() in s:
-                return threshold
-        return drift.default
+        match = _index_lookup(drift.indices, db_sym)
+        return drift.default if match is None else match
     if asset_class == AssetClass.CRYPTO:
         return drift.crypto
     if asset_class == AssetClass.OIL:

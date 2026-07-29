@@ -50,6 +50,10 @@ from tests.conftest import make_settings
         ("DE30EUR", AssetClass.INDICES),  # German index — DE30 keyword
         ("F40", AssetClass.INDICES),  # CAC 40 — F40 keyword
         ("JP225", AssetClass.INDICES),
+        ("AUS2000", AssetClass.INDICES),
+        ("HK50", AssetClass.INDICES),
+        ("CHINA50", AssetClass.INDICES),
+        ("CHINAH", AssetClass.INDICES),
         ("USOILSPOT", AssetClass.OIL),  # offset-fed oil instrument
         # Crypto — ends USD/USDT and len > 6
         ("BTCUSDT", AssetClass.CRYPTO),  # len 7
@@ -93,6 +97,15 @@ def test_offset_drift_threshold_resolves_per_asset_class() -> None:
     assert offset_drift_threshold(AssetClass.CRYPTO, drift, "BTCUSDT") == drift.crypto
     assert offset_drift_threshold(AssetClass.OIL, drift, "USOILSPOT") == drift.oil
     assert offset_drift_threshold(AssetClass.METALS, drift, "XAUUSD") == drift.metals
+
+
+def test_index_lookup_prefers_the_longest_matching_keyword() -> None:
+    # "AUS2000" contains "US2000"; the longer key must win in both tables.
+    drift = OffsetDriftConfig()
+    prox = ProximityConfig()
+    assert drift.indices["AUS2000"] != drift.indices["US2000"]
+    assert offset_drift_threshold(AssetClass.INDICES, drift, "AUS2000") == drift.indices["AUS2000"]
+    assert proximity_threshold(AssetClass.INDICES, None, prox, "AUS2000") == prox.indices["AUS2000"]
 
 
 # ---------------------------------------------------------------------------

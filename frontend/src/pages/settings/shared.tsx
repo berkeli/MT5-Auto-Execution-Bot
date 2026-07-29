@@ -58,6 +58,11 @@ export const LOCKED_OFFSET_INSTRUMENTS = new Set([
   'DE30EUR',
   'UK100GBP',
   'JP225',
+  'F40',
+  'AUS2000',
+  'HK50',
+  'CHINA50',
+  'CHINAH',
 ])
 
 // Trailing % is the inverse of partial_close_percent (storage unchanged).

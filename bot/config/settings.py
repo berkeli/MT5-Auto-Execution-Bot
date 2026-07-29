@@ -32,6 +32,11 @@ DEFAULT_OFFSET_INSTRUMENTS = [
     "DE30EUR",
     "UK100GBP",
     "JP225",
+    "F40",
+    "AUS2000",
+    "HK50",
+    "CHINA50",
+    "CHINAH",
 ]
 
 # Default DB→broker symbol map (DB symbol → MT5/broker symbol). Single source for both
@@ -47,6 +52,7 @@ _DEFAULT_SYMBOL_MAP = {
     "US2000USD": "US2000",
     "DE30EUR": "DE40",
     "UK100GBP": "UK100",
+    "AUS2000": "AUS200",
 }
 
 # Symbols every existing install should carry as offset-feed after updating. Applied
@@ -215,6 +221,23 @@ _MIGRATION_UK100_SYMBOL_FIX = "uk100_symbol_fix_v1"
 # later unchecks it keeps it off, since the migration runs at most once per install.
 _MIGRATION_FOLLOW_SERVER_TP = "follow_server_tp_enable_v1"
 
+# OANDA-fed indices the signal service now emits: HK50 (Hang Seng), CHINA50 (A50),
+# CHINAH (HSCEI) and AUS2000 (ASX 200), plus F40 — which has been OANDA-fed all along
+# but was never listed as an offset instrument, so its limits went in on the OANDA frame
+# against a broker quoting a few points away. Thresholds mirror the signal service's own
+# per-instrument tables; only AUS2000 needs a broker mapping (AUS200 at ICMarkets).
+# setdefault throughout, so a user who already tuned any of these keeps their value.
+_OANDA_INDEX_OFFSETS = ("F40", "AUS2000", "HK50", "CHINA50", "CHINAH")
+_OANDA_INDEX_PROXIMITY = {"AUS2000": 40.0, "HK50": 100.0, "CHINA50": 60.0, "CHINAH": 40.0}
+_OANDA_INDEX_DRIFT = {"AUS2000": 5.0, "HK50": 12.0, "CHINA50": 8.0, "CHINAH": 5.0}
+_OANDA_INDEX_TP: dict[str, dict] = {
+    "AUS2000": {"default": {"profit_threshold": 10.0, "trailing_distance": 10.0}},
+    "HK50": {"default": {"profit_threshold": 25.0, "trailing_distance": 25.0}},
+    "CHINA50": {"default": {"profit_threshold": 15.0, "trailing_distance": 15.0}},
+    "CHINAH": {"default": {"profit_threshold": 10.0, "trailing_distance": 10.0}},
+}
+_MIGRATION_OANDA_INDICES = "oanda_indices_backfill_v1"
+
 
 class SymbolSuffixRule(BaseModel):
     suffix: str
@@ -321,8 +344,13 @@ class ProximityConfig(BaseModel):
         "DE40": 100.0,
         "US30": 100.0,
         "US2000": 20.0,
+        "AUS2000": 40.0,
         "UK100": 50.0,
+        "F40": 40.0,
         "JP225": 200.0,
+        "HK50": 100.0,
+        "CHINA50": 60.0,
+        "CHINAH": 40.0,
     }
     stock_overrides: dict[str, float] = {}
     crypto_overrides: dict[str, float] = {}
@@ -343,7 +371,11 @@ class OffsetDriftConfig(BaseModel):
         "DE30": 8.0,
         "US30": 5.0,
         "US2000": 2.0,
+        "AUS2000": 5.0,
         "JP225": 15.0,
+        "HK50": 12.0,
+        "CHINA50": 8.0,
+        "CHINAH": 5.0,
     }
     crypto: float = 25.0
     oil: float = 0.15
@@ -694,6 +726,36 @@ def migrate_config(path: Path = _CONFIG_PATH) -> None:
             tp["follow_server_tp"] = True
             data["tp_config"] = tp
         applied.append(_MIGRATION_FOLLOW_SERVER_TP)
+        data["config_migrations"] = applied
+        changed = True
+
+    if _MIGRATION_OANDA_INDICES not in applied:
+        offset = data.get("offset_instruments")
+        if isinstance(offset, list):
+            offset.extend(sym for sym in _OANDA_INDEX_OFFSETS if sym not in offset)
+            data["offset_instruments"] = offset
+        smap = data.get("symbol_map")
+        if isinstance(smap, dict):
+            smap.setdefault("AUS2000", "AUS200")
+            data["symbol_map"] = smap
+        for container, table in (
+            ("proximity", _OANDA_INDEX_PROXIMITY),
+            ("offset_drift", _OANDA_INDEX_DRIFT),
+        ):
+            node = data.get(container)
+            if isinstance(node, dict) and isinstance(node.get("indices"), dict):
+                for sym, value in table.items():
+                    node["indices"].setdefault(sym, value)
+                data[container] = node
+        tp = data.get("tp_config")
+        if isinstance(tp, dict):
+            overrides = tp.get("instrument_overrides")
+            overrides = overrides if isinstance(overrides, dict) else {}
+            for sym, override in _OANDA_INDEX_TP.items():
+                overrides.setdefault(sym, override)
+            tp["instrument_overrides"] = overrides
+            data["tp_config"] = tp
+        applied.append(_MIGRATION_OANDA_INDICES)
         data["config_migrations"] = applied
         changed = True
 
