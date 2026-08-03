@@ -9,6 +9,7 @@ from bot.config.settings import (
     _MIGRATION_LIVE_PRICE_INTERVAL,
     _MIGRATION_OANDA_INDICES,
     _MIGRATION_OFFSET_BACKFILL,
+    _MIGRATION_PARTIAL_CLOSE_50,
     _MIGRATION_PROXIMITY_BUMP,
     _MIGRATION_RISKY_GOLD_DISABLED,
     _MIGRATION_SPREAD_HOUR_LATE,
@@ -544,8 +545,9 @@ def test_missing_file_is_noop(tmp_path) -> None:
 def test_migration_leaves_lot_sizing_and_tp_config_values_untouched(tmp_path) -> None:
     cfg = tmp_path / "config.json"
     # A user still on the original shipped defaults must keep their lot-sizing / TP
-    # *values* after an update — only "Restore defaults" changes those. The one
-    # exception is the additive instrument_overrides backfill (asserted separately).
+    # *values* after an update — only "Restore defaults" changes those. Exceptions:
+    # the additive instrument_overrides backfill and the partial_close_50 flip (both
+    # asserted separately), neither of which touches a deliberate non-zero value.
     _write(
         cfg,
         {
@@ -564,6 +566,61 @@ def test_migration_leaves_lot_sizing_and_tp_config_values_untouched(tmp_path) ->
     assert data["lot_sizing"]["mode"] == "risk_percent"  # untouched
     assert data["tp_config"]["partial_close_percent"] == 50  # not flipped
     assert data["tp_config"]["metals"]["partial_close_percent"] == 75  # not flipped
+
+
+def test_partial_close_50_flips_zeros_only(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    _write(
+        cfg,
+        {
+            "tp_config": {
+                "partial_close_percent": 0,  # top level → flipped
+                "forex": {"profit_threshold": 10.0, "partial_close_percent": 0},  # flipped
+                "metals": {"profit_threshold": 7.0, "partial_close_percent": 30},  # kept
+                "swing_overrides": {"forex_jpy": {"partial_close_percent": 0}},  # flipped
+                "risky": {"partial_close_percent": 0},  # skipped — risky keeps trail-full
+                "instrument_overrides": {
+                    "XAUUSD": {"standard": {"partial_close_percent": 0}},  # flipped (nested)
+                    "CRWD.NAS": {"partial_close_percent": 50},  # kept (flat)
+                },
+            }
+        },
+    )
+
+    migrate_config(cfg)
+
+    tp = _read(cfg)["tp_config"]
+    assert tp["partial_close_percent"] == 50
+    assert tp["forex"]["partial_close_percent"] == 50
+    assert tp["metals"]["partial_close_percent"] == 30  # deliberate value preserved
+    assert tp["swing_overrides"]["forex_jpy"]["partial_close_percent"] == 50
+    assert tp["risky"]["partial_close_percent"] == 0  # risky untouched
+    assert tp["instrument_overrides"]["XAUUSD"]["standard"]["partial_close_percent"] == 50
+    assert tp["instrument_overrides"]["CRWD.NAS"]["partial_close_percent"] == 50
+    assert _MIGRATION_PARTIAL_CLOSE_50 in _read(cfg)["config_migrations"]
+
+
+def test_partial_close_50_is_idempotent(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    _write(cfg, {"tp_config": {"forex": {"partial_close_percent": 0}}})
+    migrate_config(cfg)
+
+    # User re-sets it to trail-full after the one-time migration; must not re-flip.
+    data = _read(cfg)
+    data["tp_config"]["forex"]["partial_close_percent"] = 0
+    _write(cfg, data)
+
+    migrate_config(cfg)
+    assert _read(cfg)["tp_config"]["forex"]["partial_close_percent"] == 0
+
+
+def test_partial_close_50_noop_when_tp_config_absent(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    _write(cfg, {})
+
+    migrate_config(cfg)
+
+    assert _MIGRATION_PARTIAL_CLOSE_50 in _read(cfg)["config_migrations"]
 
 
 def test_tp_instrument_overrides_backfilled_when_absent(tmp_path) -> None:

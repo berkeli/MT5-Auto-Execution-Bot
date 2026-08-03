@@ -238,6 +238,31 @@ _OANDA_INDEX_TP: dict[str, dict] = {
 }
 _MIGRATION_OANDA_INDICES = "oanda_indices_backfill_v1"
 
+# Make 50% partial-close the default for existing installs — outcome data now favours
+# banking half at the TP trigger and trailing the rest over trailing the full position.
+# Forced once, but only flips values still at the old default of 0, so a user who
+# deliberately chose another partial-close % keeps it. The dedicated `risky` mode is
+# skipped (its own trail-full default stands).
+_MIGRATION_PARTIAL_CLOSE_50 = "partial_close_50_v1"
+
+
+def _flip_tp_partial_close_zeros(tp: dict) -> None:
+    """Recursively flip every partial_close_percent == 0 to 50 within a tp_config
+    subtree — top level, asset-class blocks, signal-type overrides, and instrument
+    overrides — leaving deliberate non-zero values and the `risky` mode untouched."""
+    for key, value in tp.items():
+        if key == "risky":
+            continue
+        if key == "partial_close_percent":
+            if value == 0:
+                tp[key] = 50
+        elif isinstance(value, dict):
+            _flip_tp_partial_close_zeros(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    _flip_tp_partial_close_zeros(item)
+
 
 class SymbolSuffixRule(BaseModel):
     suffix: str
@@ -387,8 +412,8 @@ class AssetTPConfig(BaseModel):
     profit_threshold: float
     threshold_unit: str
     trailing_distance: float
-    # 0 = trail the full position (default: trailing exits beat fixed TP on real data)
-    partial_close_percent: int = 0
+    # Close this % at the TP trigger, trail the remainder. 0 = trail the full position.
+    partial_close_percent: int = 50
 
 
 class ScalpOverrideConfig(BaseModel):
@@ -432,7 +457,7 @@ class TPConfig(BaseModel):
     # flips to 'profit' (closed_reason 'automatic') in the DB. Only the trigger changes —
     # trailing distance, partial close %, and every other exit path stay as configured.
     follow_server_tp: bool = True
-    partial_close_percent: int = 0
+    partial_close_percent: int = 50
     forex: AssetTPConfig
     forex_jpy: AssetTPConfig
     metals: AssetTPConfig
@@ -756,6 +781,15 @@ def migrate_config(path: Path = _CONFIG_PATH) -> None:
             tp["instrument_overrides"] = overrides
             data["tp_config"] = tp
         applied.append(_MIGRATION_OANDA_INDICES)
+        data["config_migrations"] = applied
+        changed = True
+
+    if _MIGRATION_PARTIAL_CLOSE_50 not in applied:
+        tp = data.get("tp_config")
+        if isinstance(tp, dict):
+            _flip_tp_partial_close_zeros(tp)
+            data["tp_config"] = tp
+        applied.append(_MIGRATION_PARTIAL_CLOSE_50)
         data["config_migrations"] = applied
         changed = True
 

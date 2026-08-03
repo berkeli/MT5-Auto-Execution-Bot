@@ -180,48 +180,48 @@
   },
   "tp_config": {
     "follow_server_tp": true,
-    "partial_close_percent": 0,
+    "partial_close_percent": 50,
     "forex": {
       "profit_threshold": 10.0,
       "threshold_unit": "pips",
       "trailing_distance": 7.0,
-      "partial_close_percent": 0
+      "partial_close_percent": 50
     },
     "forex_jpy": {
       "profit_threshold": 10.0,
       "threshold_unit": "pips",
       "trailing_distance": 7.0,
-      "partial_close_percent": 0
+      "partial_close_percent": 50
     },
     "metals": {
       "profit_threshold": 7.0,
       "threshold_unit": "dollars",
       "trailing_distance": 5.0,
-      "partial_close_percent": 0
+      "partial_close_percent": 50
     },
     "indices": {
       "profit_threshold": 15.0,
       "threshold_unit": "dollars",
       "trailing_distance": 15.0,
-      "partial_close_percent": 0
+      "partial_close_percent": 50
     },
     "stocks": {
       "profit_threshold": 5.0,
       "threshold_unit": "dollars",
       "trailing_distance": 5.0,
-      "partial_close_percent": 0
+      "partial_close_percent": 50
     },
     "crypto": {
       "profit_threshold": 500.0,
       "threshold_unit": "dollars",
       "trailing_distance": 500.0,
-      "partial_close_percent": 0
+      "partial_close_percent": 50
     },
     "oil": {
       "profit_threshold": 0.5,
       "threshold_unit": "dollars",
       "trailing_distance": 0.5,
-      "partial_close_percent": 0
+      "partial_close_percent": 50
     },
     "scalp_overrides": {
       "forex": {
@@ -231,7 +231,7 @@
       "forex_jpy": {
         "profit_threshold": 5.0,
         "trailing_distance": 4.0,
-        "partial_close_percent": 0
+        "partial_close_percent": 50
       },
       "metals": {
         "profit_threshold": 5.0,
@@ -262,7 +262,7 @@
       "forex_jpy": {
         "profit_threshold": 35.0,
         "trailing_distance": 35.0,
-        "partial_close_percent": 0
+        "partial_close_percent": 50
       },
       "metals": {
         "profit_threshold": 35.0,
@@ -309,12 +309,12 @@
         "standard": {
           "profit_threshold": 7.0,
           "trailing_distance": 5.0,
-          "partial_close_percent": 0
+          "partial_close_percent": 50
         },
         "scalp": {
           "profit_threshold": 5.0,
           "trailing_distance": 5.0,
-          "partial_close_percent": 0
+          "partial_close_percent": 50
         },
         "swing": {
           "profit_threshold": 35.0,
