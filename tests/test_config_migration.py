@@ -16,7 +16,7 @@ from bot.config.settings import (
     _MIGRATION_OFFSET_BACKFILL,
     _MIGRATION_PARTIAL_CLOSE_50,
     _MIGRATION_PROXIMITY_BUMP,
-    _MIGRATION_RISKY_GOLD_DISABLED,
+    _MIGRATION_RISKY_GOLD_ENABLED,
     _MIGRATION_SPREAD_HOUR_LATE,
     _MIGRATION_STOCK_PROXIMITY,
     _MIGRATION_STOCK_SPREAD_EARLY,
@@ -363,39 +363,39 @@ def test_example_config_ships_every_default_offset_instrument() -> None:
     assert set(DEFAULT_OFFSET_INSTRUMENTS) == set(shipped)
 
 
-def test_risky_gold_channel_disabled_by_default(tmp_path) -> None:
+def test_risky_gold_channel_enabled_on_update(tmp_path) -> None:
     cfg = tmp_path / "config.json"
-    _write(cfg, {"disabled_channels": ["1512881096650391582"]})
+    _write(cfg, {"disabled_channels": [_RISKY_GOLD_CHANNEL_ID, "1512881096650391582"]})
 
     migrate_config(cfg)
 
     data = _read(cfg)
-    assert _RISKY_GOLD_CHANNEL_ID in data["disabled_channels"]
-    assert "1512881096650391582" in data["disabled_channels"]  # existing entries preserved
-    assert _MIGRATION_RISKY_GOLD_DISABLED in data["config_migrations"]
+    assert _RISKY_GOLD_CHANNEL_ID not in data["disabled_channels"]
+    assert data["disabled_channels"] == ["1512881096650391582"]  # other channels untouched
+    assert _MIGRATION_RISKY_GOLD_ENABLED in data["config_migrations"]
 
 
-def test_risky_gold_disable_seeds_list_when_key_absent(tmp_path) -> None:
+def test_risky_gold_enable_leaves_list_absent(tmp_path) -> None:
     cfg = tmp_path / "config.json"
     _write(cfg, {})
 
     migrate_config(cfg)
 
-    assert _read(cfg)["disabled_channels"] == [_RISKY_GOLD_CHANNEL_ID]
+    assert "disabled_channels" not in _read(cfg)
 
 
-def test_risky_gold_disable_is_idempotent_and_respects_reenable(tmp_path) -> None:
+def test_risky_gold_enable_is_idempotent_and_respects_redisable(tmp_path) -> None:
     cfg = tmp_path / "config.json"
-    _write(cfg, {})
+    _write(cfg, {"disabled_channels": [_RISKY_GOLD_CHANNEL_ID]})
     migrate_config(cfg)
 
-    # User re-enables the channel after the one-time migration.
+    # User turns the channel back off after the one-time migration.
     data = _read(cfg)
-    data["disabled_channels"].remove(_RISKY_GOLD_CHANNEL_ID)
+    data["disabled_channels"].append(_RISKY_GOLD_CHANNEL_ID)
     _write(cfg, data)
 
     migrate_config(cfg)
-    assert _RISKY_GOLD_CHANNEL_ID not in _read(cfg)["disabled_channels"]  # not re-added
+    assert _read(cfg)["disabled_channels"] == [_RISKY_GOLD_CHANNEL_ID]  # not re-removed
 
 
 def test_stock_proximity_replaces_bare_keys_with_canonical(tmp_path) -> None:

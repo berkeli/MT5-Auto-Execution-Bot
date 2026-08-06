@@ -78,11 +78,12 @@ _MIGRATION_SPREAD_HOUR_LATE = "spread_hour_late_market_v1"
 # also added to offset_instruments (it postdates the earlier offset backfill).
 _MIGRATION_SYMBOL_MAP_BACKFILL = "symbol_map_backfill_v1"
 
-# Ship the "Risky Gold" channel disabled (unchecked) for existing installs: it appears
-# in the By-channel list after updating but its signals are skipped until the user opts
-# in. Applied once, so a user who later enables it keeps it enabled.
+# The "Risky Gold" channel now ships enabled. It was opt-in when introduced
+# (risky_gold_channel_disabled_v1, since removed), so existing installs carry it in
+# disabled_channels and are switched on once here. Applied once, so a user who then
+# unchecks the channel keeps it off.
 _RISKY_GOLD_CHANNEL_ID = "1522144546299838524"
-_MIGRATION_RISKY_GOLD_DISABLED = "risky_gold_channel_disabled_v1"
+_MIGRATION_RISKY_GOLD_ENABLED = "risky_gold_channel_enable_v1"
 
 # Move the stock spread-hour windows earlier (both to 15:40) for existing installs. The
 # old sl_strip_stock_start (15:55) fired after the broker had already shut the symbol at
@@ -710,14 +711,12 @@ def migrate_config(path: Path = _CONFIG_PATH) -> None:
         data["config_migrations"] = applied
         changed = True
 
-    if _MIGRATION_RISKY_GOLD_DISABLED not in applied:
+    if _MIGRATION_RISKY_GOLD_ENABLED not in applied:
         disabled = data.get("disabled_channels")
-        if not isinstance(disabled, list):
-            disabled = []
-        if _RISKY_GOLD_CHANNEL_ID not in disabled:
-            disabled.append(_RISKY_GOLD_CHANNEL_ID)
-        data["disabled_channels"] = disabled
-        applied.append(_MIGRATION_RISKY_GOLD_DISABLED)
+        if isinstance(disabled, list) and _RISKY_GOLD_CHANNEL_ID in disabled:
+            disabled.remove(_RISKY_GOLD_CHANNEL_ID)
+            data["disabled_channels"] = disabled
+        applied.append(_MIGRATION_RISKY_GOLD_ENABLED)
         data["config_migrations"] = applied
         changed = True
 
