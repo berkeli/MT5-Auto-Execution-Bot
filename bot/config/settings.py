@@ -245,6 +245,55 @@ _MIGRATION_OANDA_INDICES = "oanda_indices_backfill_v1"
 # skipped (its own trail-full default stands).
 _MIGRATION_PARTIAL_CLOSE_50 = "partial_close_50_v1"
 
+# Gold toll signals trail too wide off the metals base — tighten to a $4 trigger with a
+# $2 trail. Only rewrites the value every shipped config has carried ($5/$5), so a user
+# who tuned gold's toll TP keeps theirs.
+_GOLD_TOLL_TP_SHIPPED = {"profit_threshold": 5.0, "trailing_distance": 5.0}
+_GOLD_TOLL_TP = {"profit_threshold": 4.0, "trailing_distance": 2.0}
+_MIGRATION_GOLD_TOLL_TP = "gold_toll_tp_v1"
+
+# A total-lot value of 0 means "auto": the engine sizes it from the account balance on
+# the first cycle where the balance is known, using the same median-signal model as the
+# "Calculate approximate sizes" button, then writes the resolved lots back to
+# config.json. It's a one-shot — once filled the value is no longer 0.
+AUTO_LOT_VALUE = 0.0
+
+# New risk defaults: 2.5% per limit globally, with gold on an auto-sized total lot (its
+# signals ladder enough limits that per-limit risk sizing overshoots). Applied to
+# existing installs only when lot_sizing still matches a shipped default exactly — a
+# 5% global risk plus at most the one XAUUSD risk-% exception every template has
+# carried. Anything else (a tuned percentage, a "fixed" mode, or the exception rows the
+# approximate-sizes button writes) is a deliberate choice and is left alone.
+_SHIPPED_GOLD_EXCEPTION = {
+    "symbol": "XAUUSD",
+    "signal_type": "all",
+    "mode": "risk_percent",
+    "value": 5.0,
+}
+_GOLD_TOTAL_LOT_EXCEPTION = {
+    "symbol": "XAUUSD",
+    "signal_type": "all",
+    "mode": "total_lot",
+    "value": AUTO_LOT_VALUE,
+}
+_MIGRATION_GOLD_TOTAL_LOT = "risk_2_5_gold_total_lot_v1"
+
+
+def _lot_sizing_untouched(lot: dict) -> bool:
+    if lot.get("risk_percent") != 5.0 or lot.get("mode") not in ("risk_percent", "total_lot"):
+        return False
+    exceptions = lot.get("exceptions")
+    if not isinstance(exceptions, list):  # legacy dict form — predates the shipped list
+        return False
+    if not exceptions:
+        return True
+    if len(exceptions) != 1 or not isinstance(exceptions[0], dict):
+        return False
+    ex = exceptions[0]
+    return not ex.get("channel") and all(
+        ex.get(key) == value for key, value in _SHIPPED_GOLD_EXCEPTION.items()
+    )
+
 
 def _flip_tp_partial_close_zeros(tp: dict) -> None:
     """Recursively flip every partial_close_percent == 0 to 50 within a tp_config
@@ -296,8 +345,8 @@ class ExcludedChannelAssetConfig(BaseModel):
 
 
 class LotSizingConfig(BaseModel):
-    mode: str = "total_lot"
-    risk_percent: float | dict[str, float] = 1.0
+    mode: str = "risk_percent"
+    risk_percent: float | dict[str, float] = 2.5
     fixed_lot: float | dict[str, float] = 0.01
     # Total lots for a signal, split evenly across its limits (more limits = less per
     # limit = lower risk). Same per-instrument dict form as fixed_lot.
@@ -793,9 +842,46 @@ def migrate_config(path: Path = _CONFIG_PATH) -> None:
         data["config_migrations"] = applied
         changed = True
 
+    if _MIGRATION_GOLD_TOLL_TP not in applied:
+        tp = data.get("tp_config")
+        overrides = tp.get("instrument_overrides") if isinstance(tp, dict) else None
+        gold = overrides.get("XAUUSD") if isinstance(overrides, dict) else None
+        if isinstance(gold, dict) and gold.get("toll") == _GOLD_TOLL_TP_SHIPPED:
+            gold["toll"] = dict(_GOLD_TOLL_TP)
+            data["tp_config"] = tp
+        applied.append(_MIGRATION_GOLD_TOLL_TP)
+        data["config_migrations"] = applied
+        changed = True
+
+    if _MIGRATION_GOLD_TOTAL_LOT not in applied:
+        lot = data.get("lot_sizing")
+        if isinstance(lot, dict) and _lot_sizing_untouched(lot):
+            lot["mode"] = "risk_percent"
+            lot["risk_percent"] = 2.5
+            lot["exceptions"] = [dict(_GOLD_TOTAL_LOT_EXCEPTION)]
+            data["lot_sizing"] = lot
+        applied.append(_MIGRATION_GOLD_TOTAL_LOT)
+        data["config_migrations"] = applied
+        changed = True
+
     if changed:
         path.write_text(json.dumps(data, indent=2))
         logger.info("Applied config migration(s): %s", ", ".join(applied))
+
+
+def persist_auto_lot_values(values: dict[str, float], path: Path = _CONFIG_PATH) -> None:
+    """Write resolved lots into the AUTO-sentinel total-lot exceptions (`values` maps
+    broker symbol → total lots). Targeted raw-JSON edit so nothing else in config.json
+    is rewritten, and only still-unresolved entries are touched."""
+    data = json.loads(path.read_text())
+    exceptions = data.get("lot_sizing", {}).get("exceptions")
+    if not isinstance(exceptions, list):
+        return
+    for ex in exceptions:
+        lot = values.get(ex.get("symbol", ""))
+        if lot and ex.get("mode") == "total_lot" and ex.get("value") == AUTO_LOT_VALUE:
+            ex["value"] = lot
+    path.write_text(json.dumps(data, indent=2))
 
 
 def load_config(path: Path = _CONFIG_PATH) -> Settings | None:

@@ -1602,11 +1602,11 @@ async def test_drift_check_skipped_within_interval(sqlite_db, mock_mt5, sample_c
 
 
 async def test_unmapped_symbol_skipped_and_logged_once(sqlite_db, mock_mt5, sample_config) -> None:
-    # GCQ26 isn't in the broker catalogue → skip cleanly, no order, no select call,
+    # GCZ26_CFD isn't in the broker catalogue → skip cleanly, no order, no select call,
     # and the skip is logged exactly once across cycles.
     mock_mt5.symbols_get.return_value = frozenset({"EURUSD", "US500"})
 
-    supabase = _mock_supabase(signals=[_make_supabase_row(limit_id=70, instrument="GCQ26")])
+    supabase = _mock_supabase(signals=[_make_supabase_row(limit_id=70, instrument="GCZ26_CFD")])
     scheduler = _mock_scheduler()
 
     cycle = SyncCycle()
@@ -1615,10 +1615,10 @@ async def test_unmapped_symbol_skipped_and_logged_once(sqlite_db, mock_mt5, samp
 
     assert r1.placed == 0 and r2.placed == 0
     mock_mt5.order_send.assert_not_called()
-    assert "GCQ26" in cycle._logged_unmapped
+    assert "GCZ26_CFD" in cycle._logged_unmapped
     # Never selected (it doesn't exist on the broker)
     for call in mock_mt5.symbol_select.call_args_list:
-        assert call.args[0] != "GCQ26"
+        assert call.args[0] != "GCZ26_CFD"
 
 
 async def test_catalogued_symbol_is_selected(sqlite_db, mock_mt5, sample_config) -> None:

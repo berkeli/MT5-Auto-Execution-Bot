@@ -27,7 +27,7 @@ _INSTRUMENT_MEDIANS: dict[str, float] = {
     "BTCUSDT": 4485.00,
     "ETHUSDT": 936.00,
     "JP225": 1565.00,
-    "GCQ26": 59.00,
+    "GCZ26_CFD": 59.00,
     "DE30EUR": 1058.50,
     "US30USD": 431.00,
     "UK100GBP": 618.72,

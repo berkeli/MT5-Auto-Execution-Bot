@@ -2,8 +2,8 @@
   "license_key": "",
   "mt5_terminal_path": "",
   "lot_sizing": {
-    "mode": "total_lot",
-    "risk_percent": 5.0,
+    "mode": "risk_percent",
+    "risk_percent": 2.5,
     "fixed_lot": 0.01,
     "total_lot": 0.1,
     "max_lot_per_order": 999.0,
@@ -11,8 +11,8 @@
       {
         "symbol": "XAUUSD",
         "signal_type": "all",
-        "mode": "risk_percent",
-        "value": 5.0
+        "mode": "total_lot",
+        "value": 0
       }
     ],
     "skip_limits_at": 0
@@ -321,8 +321,8 @@
           "trailing_distance": 25.0
         },
         "toll": {
-          "profit_threshold": 5.0,
-          "trailing_distance": 5.0
+          "profit_threshold": 4.0,
+          "trailing_distance": 2.0
         },
         "pa": {
           "profit_threshold": 10.0,

@@ -3,7 +3,12 @@ from pathlib import Path
 
 from bot.config.settings import (
     _CRYPTO_PROXIMITY_OVERRIDES,
+    _GOLD_TOLL_TP,
+    _GOLD_TOLL_TP_SHIPPED,
+    _GOLD_TOTAL_LOT_EXCEPTION,
     _MIGRATION_CRYPTO_PROXIMITY,
+    _MIGRATION_GOLD_TOLL_TP,
+    _MIGRATION_GOLD_TOTAL_LOT,
     _MIGRATION_INDEX_F40,
     _MIGRATION_JP225_OFFSET,
     _MIGRATION_LIVE_PRICE_INTERVAL,
@@ -24,8 +29,10 @@ from bot.config.settings import (
     _OANDA_INDEX_TP,
     _OFFSET_BACKFILL_SYMBOLS,
     _RISKY_GOLD_CHANNEL_ID,
+    _SHIPPED_GOLD_EXCEPTION,
     _STOCK_PROXIMITY_OVERRIDES,
     _TP_INSTRUMENT_OVERRIDES,
+    AUTO_LOT_VALUE,
     DEFAULT_OFFSET_INSTRUMENTS,
     migrate_config,
 )
@@ -753,3 +760,137 @@ def test_oanda_indices_is_idempotent_and_respects_removal(tmp_path) -> None:
 
     migrate_config(cfg)
     assert "CHINAH" not in _read(cfg)["offset_instruments"]  # not re-added
+
+
+# ---------------------------------------------------------------------------
+# 2.5% risk + auto-sized gold total lot, and gold's tighter toll TP
+# ---------------------------------------------------------------------------
+
+
+def _shipped_lot_sizing(**overrides) -> dict:
+    lot = {
+        "mode": "total_lot",
+        "risk_percent": 5.0,
+        "fixed_lot": 0.01,
+        "total_lot": 0.1,
+        "max_lot_per_order": 999.0,
+        "exceptions": [dict(_SHIPPED_GOLD_EXCEPTION)],
+        "skip_limits_at": 0,
+    }
+    lot.update(overrides)
+    return lot
+
+
+def test_gold_total_lot_migrates_untouched_lot_sizing(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    _write(cfg, {"lot_sizing": _shipped_lot_sizing()})
+
+    migrate_config(cfg)
+
+    lot = _read(cfg)["lot_sizing"]
+    assert lot["mode"] == "risk_percent"
+    assert lot["risk_percent"] == 2.5
+    assert lot["exceptions"] == [dict(_GOLD_TOTAL_LOT_EXCEPTION)]
+    assert lot["exceptions"][0]["value"] == AUTO_LOT_VALUE  # engine sizes it from balance
+    assert lot["max_lot_per_order"] == 999.0  # untouched keys survive
+    assert _MIGRATION_GOLD_TOTAL_LOT in _read(cfg)["config_migrations"]
+
+
+def test_gold_total_lot_migrates_when_exceptions_empty(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    _write(cfg, {"lot_sizing": _shipped_lot_sizing(mode="risk_percent", exceptions=[])})
+
+    migrate_config(cfg)
+
+    assert _read(cfg)["lot_sizing"]["exceptions"] == [dict(_GOLD_TOTAL_LOT_EXCEPTION)]
+
+
+def test_gold_total_lot_skips_tuned_risk_percent(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    lot = _shipped_lot_sizing(risk_percent=1.0)
+    _write(cfg, {"lot_sizing": lot})
+
+    migrate_config(cfg)
+
+    assert _read(cfg)["lot_sizing"] == lot
+
+
+def test_gold_total_lot_skips_user_exceptions(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    # What the "Calculate approximate sizes" button leaves behind.
+    lot = _shipped_lot_sizing(
+        mode="fixed",
+        exceptions=[
+            {"symbol": "XAUUSD", "signal_type": "all", "mode": "fixed", "value": 0.3},
+            {"symbol": "US500", "signal_type": "all", "mode": "fixed", "value": 1.2},
+        ],
+    )
+    _write(cfg, {"lot_sizing": lot})
+
+    migrate_config(cfg)
+
+    assert _read(cfg)["lot_sizing"] == lot
+
+
+def test_gold_total_lot_skips_per_channel_exception(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    scoped = dict(_SHIPPED_GOLD_EXCEPTION, channel="1522144546299838524")
+    lot = _shipped_lot_sizing(exceptions=[scoped])
+    _write(cfg, {"lot_sizing": lot})
+
+    migrate_config(cfg)
+
+    assert _read(cfg)["lot_sizing"] == lot
+
+
+def test_gold_total_lot_is_idempotent_and_respects_reversal(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    _write(cfg, {"lot_sizing": _shipped_lot_sizing()})
+    migrate_config(cfg)
+
+    # User goes back to a flat fixed lot after the one-time migration.
+    data = _read(cfg)
+    data["lot_sizing"]["mode"] = "fixed"
+    data["lot_sizing"]["exceptions"] = []
+    _write(cfg, data)
+
+    migrate_config(cfg)
+    assert _read(cfg)["lot_sizing"]["mode"] == "fixed"
+    assert _read(cfg)["lot_sizing"]["exceptions"] == []
+
+
+def test_gold_toll_tp_tightened(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    gold = {
+        "standard": {"profit_threshold": 7.0, "trailing_distance": 5.0},
+        "toll": dict(_GOLD_TOLL_TP_SHIPPED),
+    }
+    _write(cfg, {"tp_config": {"instrument_overrides": {"XAUUSD": gold}}})
+
+    migrate_config(cfg)
+
+    overrides = _read(cfg)["tp_config"]["instrument_overrides"]["XAUUSD"]
+    assert overrides["toll"] == _GOLD_TOLL_TP == {"profit_threshold": 4.0, "trailing_distance": 2.0}
+    assert overrides["standard"] == {"profit_threshold": 7.0, "trailing_distance": 5.0}
+    assert _MIGRATION_GOLD_TOLL_TP in _read(cfg)["config_migrations"]
+
+
+def test_gold_toll_tp_respects_tuned_value(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    tuned = {"profit_threshold": 8.0, "trailing_distance": 3.0}
+    _write(cfg, {"tp_config": {"instrument_overrides": {"XAUUSD": {"toll": tuned}}}})
+
+    migrate_config(cfg)
+
+    assert _read(cfg)["tp_config"]["instrument_overrides"]["XAUUSD"]["toll"] == tuned
+
+
+def test_example_config_carries_the_new_defaults() -> None:
+    data = json.loads(_EXAMPLE_CONFIG.read_text())
+    lot = data["lot_sizing"]
+    assert lot["mode"] == "risk_percent" and lot["risk_percent"] == 2.5
+    assert lot["exceptions"] == [
+        {"symbol": "XAUUSD", "signal_type": "all", "mode": "total_lot", "value": AUTO_LOT_VALUE}
+    ]
+    gold = data["tp_config"]["instrument_overrides"]["XAUUSD"]
+    assert gold["toll"] == _GOLD_TOLL_TP

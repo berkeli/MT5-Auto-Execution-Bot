@@ -1,11 +1,12 @@
 import asyncio
+import json
 import logging
 import time
 from datetime import UTC, datetime
 from typing import Any
 
 from bot.config.constants import BOT_VERSION
-from bot.config.settings import Settings, load_config
+from bot.config.settings import AUTO_LOT_VALUE, Settings, load_config, persist_auto_lot_values
 from bot.core.dashboard_cache import DashboardCache
 from bot.core.reconciler import Reconciler
 from bot.core.sync_cycle import SyncCycle
@@ -419,6 +420,7 @@ class Engine:
                 self._last_sync_summary = key
                 await self._broadcast_status()
                 await self._update_dashboard()
+                self._autofill_auto_lots()
                 await self._maybe_upsert_user_snapshot()
             except Exception:
                 logger.error("sync_loop error", exc_info=True)
@@ -637,6 +639,41 @@ class Engine:
             )
         except Exception:
             logger.error("Dashboard cache update failed", exc_info=True)
+
+    def _autofill_auto_lots(self) -> None:
+        """Resolve total-lot exceptions left at the AUTO sentinel — gold ships that way
+        so its lots track the account rather than a guessed constant. Sized off the
+        balance with the same median-signal model as the approximate-sizes button and
+        written back to config.json, so it's a one-shot: the value is no longer the
+        sentinel next cycle. Until it resolves the exception sizes at the broker minimum,
+        which is a conservative under-size for the cycle or two before the balance loads."""
+        pending = {
+            ex.symbol
+            for ex in self._config.lot_sizing.exceptions
+            if ex.mode == "total_lot" and ex.value == AUTO_LOT_VALUE and ex.symbol
+        }
+        if not pending:
+            return
+        acct = self.dashboard_cache.data.account
+        balance = float(acct.get("balance") or 0) if acct else 0.0
+        if balance <= 0:
+            return
+        recs = approx_lot.compute_recommendations(
+            self._config,
+            balance,
+            self.lot_specs,
+            self._config.lot_sizing.max_lot_per_order,
+            "total_lot",
+        )
+        resolved = {r.symbol: r.value for r in recs if r.symbol in pending}
+        if not resolved:
+            return
+        try:
+            persist_auto_lot_values(resolved)
+        except (OSError, json.JSONDecodeError):
+            logger.error("Auto lot-size write failed", exc_info=True)
+            return
+        logger.info("Auto-sized total lots from balance %.2f: %s", balance, resolved)
 
     def _refresh_lot_specs(self, catalogue: frozenset[str]) -> None:
         """Cache SymbolInfo for the approximate-lot target instruments the broker

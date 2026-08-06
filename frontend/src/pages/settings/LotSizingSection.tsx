@@ -197,7 +197,8 @@ export function LotSizingSection({
       <div className="panel-head" style={{ marginBottom: 6 }}>
         <h3 style={{ fontSize: 14 }}>Exceptions</h3>
         <span className="sub">
-          most specific match wins — channel beats symbol beats signal type
+          most specific match wins — channel beats symbol beats signal type. A Total value of 0
+          auto-sizes from your balance on the next sync
         </span>
       </div>
       {lotExceptions.length > 0 && (

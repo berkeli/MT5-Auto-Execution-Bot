@@ -779,7 +779,7 @@ class SyncCycle:
         """Resolve each new limit's MT5 symbol against the broker's catalogue and
         fetch its tick/info.
 
-        Symbols the broker doesn't carry (e.g. GCQ26) are skipped cleanly and
+        Symbols the broker doesn't carry (e.g. GCZ26_CFD) are skipped cleanly and
         logged once for their lifetime — no retry churn. Catalogued-but-hidden
         symbols are selected into MarketWatch first. Symbols whose tick failed
         recently are cooldown-suppressed (no MT5 call, no log); on first failure /
