@@ -42,6 +42,7 @@ class OrderPlacer:
         supabase: SupabaseDB,
         channel_id: int | None = None,
         sequence_number: int | None = None,
+        ladder_size: int | None = None,
     ) -> PlacementOutcome:
         tick = mt5_client.symbol_info_tick(mt5_symbol)
         if tick is None:
@@ -109,6 +110,7 @@ class OrderPlacer:
             symbol=mt5_symbol,
             channel_id=channel_id,
             sequence_number=sequence_number,
+            ladder_size=ladder_size,
         )
 
         # Pre-send status recheck — abort if signal was cancelled since this cycle began

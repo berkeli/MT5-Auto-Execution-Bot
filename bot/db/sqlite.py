@@ -98,6 +98,7 @@ class SQLiteDB:
             "fill_price REAL",
             "exit_slippage_points REAL",
             "close_reason TEXT",
+            "ladder_size INTEGER",
         ):
             name = col.split()[0]
             try:
@@ -153,6 +154,7 @@ class SQLiteDB:
         symbol: str | None = None,
         channel_id: int | None = None,
         sequence_number: int | None = None,
+        ladder_size: int | None = None,
     ) -> None:
         await self._db.execute(
             "DELETE FROM order_mappings WHERE limit_id = ? AND status NOT IN ('pending', 'filled')",
@@ -175,6 +177,7 @@ class SQLiteDB:
                 symbol,
                 channel_id,
                 sequence_number,
+                ladder_size,
             ),
         )
         await self._db.commit()
@@ -331,6 +334,7 @@ class SQLiteDB:
         symbol: str | None = None,
         channel_id: int | None = None,
         sequence_number: int | None = None,
+        ladder_size: int | None = None,
     ) -> None:
         """Pre-write a claim row before order_send(). Uses -limit_id as placeholder ticket."""
         await self._db.execute(
@@ -354,6 +358,7 @@ class SQLiteDB:
                 symbol,
                 channel_id,
                 sequence_number,
+                ladder_size,
             ),
         )
         await self._db.commit()

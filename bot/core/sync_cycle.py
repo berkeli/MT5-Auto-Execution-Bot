@@ -454,9 +454,21 @@ class SyncCycle:
             live_prices = ctx.live_prices
 
             if placement_active:
+                # Signals whose ladder is mid-trade must not be disturbed by a
+                # re-placement: bot has a local fill, OR Supabase signal_status is
+                # 'hit' (the TM has marked at least one limit hit, even if MT5
+                # hasn't filled yet). Shared by the resize and drift checks below;
+                # placement only ever adds pendings, so it can't change this set.
+                blocked_from_drift = await sqlite.get_signals_with_fills() | {
+                    r["signal_id"] for r in supabase_rows if r.get("signal_status") == "hit"
+                }
+
                 await self._cancel_tp_fired_pending(ctx, sqlite, mt5_client, result)
                 await self._cancel_stale_pending(ctx, sqlite, mt5_client, result)
                 await self._cancel_sl_changed_pending(ctx, sqlite, mt5_client, result)
+                await self._cancel_resized_pending(
+                    ctx, blocked_from_drift, sqlite, mt5_client, result
+                )
 
                 new_limit_ids = await self._select_new_limits(ctx, sqlite)
                 stale_feeds = await self._fetch_stale_feeds_cached(supabase, config, cache_now)
@@ -493,13 +505,6 @@ class SyncCycle:
                         result,
                     )
 
-                # Signals whose ladder is mid-trade must not be disturbed by drift
-                # re-placement: bot has a local fill, OR Supabase signal_status is
-                # 'hit' (the TM has marked at least one limit hit, even if MT5
-                # hasn't filled yet).
-                blocked_from_drift = await sqlite.get_signals_with_fills() | {
-                    r["signal_id"] for r in supabase_rows if r.get("signal_status") == "hit"
-                }
                 await self._check_offset_drift(ctx, blocked_from_drift, sqlite, mt5_client, result)
                 await self._check_proximity_drift(
                     ctx, blocked_from_drift, sqlite, mt5_client, result
@@ -1103,6 +1108,7 @@ class SyncCycle:
                 supabase=supabase,
                 channel_id=row["channel_id"],
                 sequence_number=row["sequence_number"],
+                ladder_size=row["total_limits"],
             )
             if outcome == "placed":
                 result.placed += 1
@@ -1465,6 +1471,54 @@ class SyncCycle:
                 result.cancelled += ok
                 result.errors += not ok
                 ctx.repriced_tickets.add(row["mt5_ticket"])
+
+    async def _cancel_resized_pending(
+        self,
+        ctx: _CycleContext,
+        blocked_from_drift: set[int],
+        sqlite: SQLiteDB,
+        mt5_client: MT5Client,
+        result: SyncResult,
+    ) -> None:
+        """Cancel pendings whose signal's ladder changed size (re-places next cycle).
+
+        A TM message edit rewrites signals.total_limits to the edited level count
+        and inserts only the genuinely new levels, so a 4-limit ladder edited to 5
+        leaves four orders sized at total/4 sitting next to one at total/5. Both
+        ladder-splitting modes divide by that count, so the survivors have to be
+        re-placed against the new one for the signal to hold its budget.
+
+        Keyed on the placement-time ladder_size rather than on a recomputed lot:
+        the risk_percent inputs (balance, SL distances) drift on their own, and
+        re-placing a live ladder because the balance ticked over a volume step is
+        churn nobody asked for. Signals with a fill (or DB-hit) are spared as they
+        are everywhere else — their lot is pinned to the filled sibling, so
+        re-placing could not resize them anyway. Rows placed before the column
+        existed carry NULL and are left alone, so updating the bot doesn't
+        re-place every open ladder on the first cycle.
+        """
+        for row in ctx.sqlite_pending:
+            if row["mt5_ticket"] in ctx.repriced_tickets:
+                continue
+            sup = ctx.supabase_by_limit.get(row["limit_id"])
+            if sup is None or row["signal_id"] in blocked_from_drift:
+                continue
+            placed, current = row["ladder_size"], sup["total_limits"]
+            if placed is None or current is None or placed == current:
+                continue
+            logger.info(
+                "Ladder resize: signal=%d ticket=%d limits %d -> %d — cancelling for re-placement",
+                row["signal_id"],
+                row["mt5_ticket"],
+                placed,
+                current,
+            )
+            ok = await self._canceller.cancel_order(
+                row["mt5_ticket"], mt5_client, sqlite, spread=False
+            )
+            result.cancelled += ok
+            result.errors += not ok
+            ctx.repriced_tickets.add(row["mt5_ticket"])
 
     async def _cancel_gate_blocked_pending(
         self, ctx: _CycleContext, sqlite: SQLiteDB, mt5_client: MT5Client, result: SyncResult

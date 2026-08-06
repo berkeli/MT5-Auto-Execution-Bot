@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS order_mappings (
     mae_price               REAL NOT NULL DEFAULT 0,
     fill_price              REAL,
     exit_slippage_points    REAL,
-    close_reason            TEXT
+    close_reason            TEXT,
+    ladder_size             INTEGER
 )
 """
 
@@ -97,8 +98,8 @@ INSERT_ORDER = """
 INSERT OR IGNORE INTO order_mappings
     (limit_id, signal_id, mt5_ticket, order_type, lot_size, placed_at,
      db_stop_loss, signal_type, feed_price_at_placement, mt5_price_at_placement,
-     offset_at_placement, symbol, channel_id, sequence_number)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     offset_at_placement, symbol, channel_id, sequence_number, ladder_size)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 MARK_FILLED = """
@@ -158,8 +159,8 @@ INSERT_CLAIMED_ORDER = """
 INSERT OR IGNORE INTO order_mappings
     (limit_id, signal_id, mt5_ticket, order_type, lot_size, placed_at,
      db_stop_loss, signal_type, feed_price_at_placement, mt5_price_at_placement,
-     offset_at_placement, symbol, channel_id, sequence_number, status)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claimed')
+     offset_at_placement, symbol, channel_id, sequence_number, ladder_size, status)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claimed')
 """
 
 PROMOTE_CLAIMED_TO_PENDING = """

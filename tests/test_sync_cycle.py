@@ -496,6 +496,183 @@ async def test_proximity_drift_cancels_far_pending(sqlite_db, mock_mt5, sample_c
     assert len(await sqlite_db.get_pending_orders()) == 0
 
 
+# ---------------------------------------------------------------------------
+# Ladder resize: a TM edit that changes total_limits re-places the survivors
+# ---------------------------------------------------------------------------
+
+
+async def _insert_near_pending(sqlite_db, limit_id, ticket, ladder_size, lot=0.05):
+    # Sits ~1 pip off the mock mid so proximity drift leaves it alone.
+    await sqlite_db.insert_order(
+        limit_id=limit_id,
+        signal_id=1,
+        mt5_ticket=ticket,
+        order_type="buy_limit",
+        lot_size=lot,
+        placed_at="2026-01-01T00:00:00+00:00",
+        db_stop_loss=1.08500,
+        signal_type="standard",
+        ladder_size=ladder_size,
+    )
+
+
+async def test_ladder_growth_cancels_stale_sized_pendings(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    # Ladder edited 4 -> 5: the four orders placed at total/4 are cancelled so
+    # they re-place at total/5 next cycle.
+    for i, ticket in enumerate((2001, 2002, 2003, 2004), start=1):
+        await _insert_near_pending(sqlite_db, i, ticket, ladder_size=4)
+    mock_mt5.cancel_pending_order.side_effect = lambda t: make_order_result(ticket=t)
+
+    rows = []
+    for i in range(1, 5):
+        r = _make_supabase_row(limit_id=i, total_limits=5)
+        r["price_level"] = 1.10010
+        rows.append(r)
+    supabase = _mock_supabase(signals=rows)
+
+    cycle = SyncCycle()
+    result = await cycle.run(
+        supabase, sqlite_db, mock_mt5, sample_config, _mock_scheduler(cancel_pending=False)
+    )
+
+    assert result.cancelled == 4
+    assert len(await sqlite_db.get_pending_orders()) == 0
+
+
+async def test_unchanged_ladder_leaves_pendings_alone(sqlite_db, mock_mt5, sample_config) -> None:
+    await _insert_near_pending(sqlite_db, 1, 2001, ladder_size=4)
+    row = _make_supabase_row(limit_id=1, total_limits=4)
+    row["price_level"] = 1.10010
+
+    cycle = SyncCycle()
+    result = await cycle.run(
+        _mock_supabase(signals=[row]),
+        sqlite_db,
+        mock_mt5,
+        sample_config,
+        _mock_scheduler(cancel_pending=False),
+    )
+
+    assert result.cancelled == 0
+    mock_mt5.cancel_pending_order.assert_not_called()
+    assert len(await sqlite_db.get_pending_orders()) == 1
+
+
+async def test_null_ladder_size_is_not_replaced(sqlite_db, mock_mt5, sample_config) -> None:
+    # Rows placed before the ladder_size column existed must survive the upgrade
+    # rather than all being cancelled on the first cycle after the update.
+    await _insert_near_pending(sqlite_db, 1, 2001, ladder_size=None)
+    row = _make_supabase_row(limit_id=1, total_limits=5)
+    row["price_level"] = 1.10010
+
+    cycle = SyncCycle()
+    result = await cycle.run(
+        _mock_supabase(signals=[row]),
+        sqlite_db,
+        mock_mt5,
+        sample_config,
+        _mock_scheduler(cancel_pending=False),
+    )
+
+    assert result.cancelled == 0
+    mock_mt5.cancel_pending_order.assert_not_called()
+    assert len(await sqlite_db.get_pending_orders()) == 1
+
+
+async def test_ladder_growth_resizes_every_limit_to_new_split(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    """The whole point: a 0.2 total_lot gold ladder edited 4 -> 5 ends up with
+    five orders at 0.04, not four at 0.05 next to one at 0.04."""
+    from bot.config.settings import LotExceptionConfig
+
+    sample_config.lot_sizing.mode = "total_lot"
+    sample_config.lot_sizing.exceptions = [
+        LotExceptionConfig(symbol="XAUUSD", mode="total_lot", value=0.2)
+    ]
+    mock_mt5.symbol_info.return_value = make_symbol_info(
+        name="XAUUSD", digits=2, point=0.01, volume_step=0.01, volume_min=0.01
+    )
+    mock_mt5.symbol_info_tick.return_value = make_tick(symbol="XAUUSD", bid=4304.0, ask=4304.5)
+    mock_mt5.account_info.return_value = make_account_info()
+    mock_mt5.order_get_by_ticket.return_value = None
+    mock_mt5.cancel_pending_order.side_effect = lambda t: make_order_result(ticket=t)
+
+    def _gold_rows(n_rows, total_limits):
+        # Longs a few dollars under the mid: inside the $25 metals proximity and
+        # below the ask, so every limit actually places.
+        out = []
+        for i in range(1, n_rows + 1):
+            r = _make_supabase_row(limit_id=i, instrument="XAUUSD", total_limits=total_limits)
+            r["stop_loss"], r["price_level"] = 4280.0, 4290.0 + i
+            out.append(r)
+        return out
+
+    scheduler = _mock_scheduler(cancel_pending=False)
+    cycle = SyncCycle()
+
+    # Cycle 1 — the original 4-limit ladder goes on at 0.2/4.
+    tickets = iter(range(7001, 7099))
+    mock_mt5.order_send.side_effect = lambda *_: make_order_result(ticket=next(tickets))
+    sb = _mock_supabase(signals=_gold_rows(4, 4))
+    sb.fetch_signal_status.return_value = "active"
+    await cycle.run(sb, sqlite_db, mock_mt5, sample_config, scheduler)
+
+    placed = await sqlite_db.get_pending_orders()
+    assert len(placed) == 4
+    assert {r["lot_size"] for r in placed} == {0.05}
+
+    # The TM edit lands: total_limits 4 -> 5, with only the new level inserted.
+    # The rev moves because the TM's triggers bump it on every signals/limits
+    # write — without that the cycle would keep serving the cached signal set.
+    sb = _mock_supabase(signals=_gold_rows(5, 5))
+    sb.fetch_signal_status.return_value = "active"
+    sb.fetch_sync_state.return_value = (None, None, 2)
+
+    # Cycle 2 — the four stale-sized orders are pulled, the new 5th goes on at 0.2/5.
+    await cycle.run(sb, sqlite_db, mock_mt5, sample_config, scheduler)
+    # Cycle 3 — the four re-place against the new ladder size.
+    await cycle.run(sb, sqlite_db, mock_mt5, sample_config, scheduler)
+
+    final = await sqlite_db.get_pending_orders()
+    assert len(final) == 5
+    assert {r["lot_size"] for r in final} == {0.04}
+    assert {r["ladder_size"] for r in final} == {5}
+    assert sum(r["lot_size"] for r in final) == pytest.approx(0.2, abs=1e-9)
+
+    # Cycle 4 — converged: re-placing must not re-trigger itself into a churn loop.
+    settled = await cycle.run(sb, sqlite_db, mock_mt5, sample_config, scheduler)
+    assert (settled.placed, settled.cancelled) == (0, 0)
+
+
+async def test_ladder_resize_spares_signal_with_fill(sqlite_db, mock_mt5, sample_config) -> None:
+    # A mid-trade ladder is never disturbed: its lot is pinned to the filled
+    # sibling, so re-placing could not resize it anyway.
+    await _insert_near_pending(sqlite_db, 1, 2001, ladder_size=4)
+    await _insert_near_pending(sqlite_db, 2, 2002, ladder_size=4)
+    await sqlite_db.mark_filled(2002, "2026-01-01T00:01:00+00:00")
+
+    rows = []
+    for i in (1, 2):
+        r = _make_supabase_row(limit_id=i, total_limits=5)
+        r["price_level"] = 1.10010
+        rows.append(r)
+
+    cycle = SyncCycle()
+    result = await cycle.run(
+        _mock_supabase(signals=rows),
+        sqlite_db,
+        mock_mt5,
+        sample_config,
+        _mock_scheduler(cancel_pending=False),
+    )
+
+    assert result.cancelled == 0
+    mock_mt5.cancel_pending_order.assert_not_called()
+
+
 async def test_proximity_drift_keeps_near_pending(sqlite_db, mock_mt5, sample_config) -> None:
     # Same setup but the limit sits ~1 pip from the broker mid — inside proximity, so it
     # must be left alone (not cancelled, not re-placed).
