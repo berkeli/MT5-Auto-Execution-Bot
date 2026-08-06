@@ -45,13 +45,26 @@ _STATUS_MAX_AGE = 30.0
 _STATUS_MAX_AGE_LEGACY = 2.0
 
 
+# Hysteresis band on the proximity gate: a limit is placed at the threshold but only
+# cancelled once price has walked 1.5x it away. Without the gap, price fluctuating
+# across the threshold cancels and re-places the same ladder every cycle — churn the
+# broker sees as order spam.
+_PROXIMITY_EXIT_MULTIPLIER = 1.5
+
+
 def _within_proximity(
-    limit_prices: list[float], mid: float, asset_class: AssetClass, info, prox, db_sym: str = ""
+    limit_prices: list[float],
+    mid: float,
+    asset_class: AssetClass,
+    info,
+    prox,
+    db_sym: str = "",
+    multiplier: float = 1.0,
 ) -> bool:
     threshold = proximity_threshold(asset_class, info, prox, db_sym)
     if threshold is None:
         return True
-    return min(abs(p - mid) for p in limit_prices) <= threshold
+    return min(abs(p - mid) for p in limit_prices) <= threshold * multiplier
 
 
 @dataclass
@@ -1203,6 +1216,10 @@ class SyncCycle:
         DB-hit) are spared, exactly as offset drift does: their ladder is mid-trade
         and must not be disturbed.
 
+        The cancel distance is _PROXIMITY_EXIT_MULTIPLIER x the placement threshold,
+        never the threshold itself: price hovering right at it would otherwise
+        cancel and re-place the same ladder on alternating cycles.
+
         Evaluated per signal as one unit — same min-distance rule placement uses
         (_within_proximity over all the signal's limit prices). A ladder is either
         in proximity (keep every limit) or out (cancel every limit) together. A
@@ -1240,7 +1257,13 @@ class SyncCycle:
                 mid = (tick.bid + tick.ask) / 2
             prices = [float(ctx.supabase_by_limit[r["limit_id"]]["price_level"]) for r in sig_rows]
             if _within_proximity(
-                prices, mid, detect_asset_class(db_sym), info, config.proximity, db_sym
+                prices,
+                mid,
+                detect_asset_class(db_sym),
+                info,
+                config.proximity,
+                db_sym,
+                _PROXIMITY_EXIT_MULTIPLIER,
             ):
                 continue
             logger.info(

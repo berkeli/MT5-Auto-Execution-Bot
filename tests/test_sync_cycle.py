@@ -699,6 +699,62 @@ async def test_proximity_drift_keeps_near_pending(sqlite_db, mock_mt5, sample_co
     assert len(await sqlite_db.get_pending_orders()) == 1
 
 
+async def test_proximity_drift_keeps_pending_inside_hysteresis_band(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    # ~18 pips from mid 1.10001: past the 15-pip placement threshold but inside the
+    # 1.5x (22.5-pip) cancel distance, so the pending stays. Without the band, price
+    # fluctuating around 15 pips would cancel and re-place this order every cycle.
+    await sqlite_db.insert_order(
+        limit_id=1,
+        signal_id=1,
+        mt5_ticket=2001,
+        order_type="buy_limit",
+        lot_size=0.1,
+        placed_at="2026-01-01T00:00:00+00:00",
+        db_stop_loss=1.08500,
+        signal_type="standard",
+    )
+    row = _make_supabase_row(limit_id=1)
+    row["price_level"] = 1.09820
+    supabase = _mock_supabase(signals=[row])
+    scheduler = _mock_scheduler(cancel_pending=False)
+
+    cycle = SyncCycle()
+    result = await cycle.run(supabase, sqlite_db, mock_mt5, sample_config, scheduler)
+
+    assert result.cancelled == 0
+    mock_mt5.cancel_pending_order.assert_not_called()
+    assert len(await sqlite_db.get_pending_orders()) == 1
+
+
+async def test_proximity_drift_cancels_pending_beyond_hysteresis_band(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    # ~25 pips out — past the 22.5-pip cancel distance, so the band doesn't save it.
+    await sqlite_db.insert_order(
+        limit_id=1,
+        signal_id=1,
+        mt5_ticket=2001,
+        order_type="buy_limit",
+        lot_size=0.1,
+        placed_at="2026-01-01T00:00:00+00:00",
+        db_stop_loss=1.08500,
+        signal_type="standard",
+    )
+    mock_mt5.cancel_pending_order.return_value = make_order_result(ticket=2001)
+    row = _make_supabase_row(limit_id=1)
+    row["price_level"] = 1.09750
+    supabase = _mock_supabase(signals=[row])
+    scheduler = _mock_scheduler(cancel_pending=False)
+
+    cycle = SyncCycle()
+    result = await cycle.run(supabase, sqlite_db, mock_mt5, sample_config, scheduler)
+
+    assert result.cancelled == 1
+    assert len(await sqlite_db.get_pending_orders()) == 0
+
+
 async def test_proximity_drift_keeps_whole_ladder_when_closest_near(
     sqlite_db, mock_mt5, sample_config
 ) -> None:
