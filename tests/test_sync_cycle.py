@@ -16,7 +16,7 @@ from tests.conftest import (
 
 
 def _make_supabase_row(
-    limit_id=1, signal_id=1, instrument="EURUSD", signal_status="active"
+    limit_id=1, signal_id=1, instrument="EURUSD", signal_status="active", total_limits=1
 ) -> dict:
     return {
         "limit_id": limit_id,
@@ -29,6 +29,7 @@ def _make_supabase_row(
         "signal_status": signal_status,
         "channel_id": None,
         "sequence_number": 1,
+        "total_limits": total_limits,
     }
 
 

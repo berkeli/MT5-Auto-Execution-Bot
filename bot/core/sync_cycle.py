@@ -1000,10 +1000,13 @@ class SyncCycle:
     ) -> dict[int, float]:
         """Compute lot once per approved signal (not once per limit).
 
-        If the signal already has filled siblings, reuse their placement lot
-        rather than recomputing: the Supabase fetch drops hit limits
-        (l.status='hit'), so recomputation would divide the size across only the
-        still-pending survivors and oversize the re-placed limits.
+        The ladder split uses the signal's declared total_limits, so a limit
+        placed before the TM has inserted the rest of its ladder is still sized
+        against the full ladder. If the signal already has filled siblings, reuse
+        their placement lot rather than recomputing: the risk_percent inputs
+        (balance, and the SL distances of the limits still visible after the fetch
+        drops hit ones) drift, and a re-placed limit should match the size its
+        siblings went on at.
         """
         by_signal: dict[int, list] = defaultdict(list)
         for row in ctx.supabase_rows:
@@ -1035,6 +1038,7 @@ class SyncCycle:
                 mt5_sym,
                 row0["signal_type"] or "standard",
                 channel_id=row0["channel_id"],
+                ladder_size=row0["total_limits"],
             )
         return signal_lots
 

@@ -114,11 +114,22 @@ class LotCalculator:
         mt5_symbol: str,
         signal_type: str = "all",
         channel_id: int | None = None,
+        ladder_size: int | None = None,
     ) -> float:
+        """`ladder_size` is the signal's declared limit count (Supabase
+        signals.total_limits). The ladder-splitting modes divide by it rather than
+        by len(limit_prices): the TM inserts a signal's limits in several batches
+        (outer levels first, infills seconds later), so the rows visible at
+        placement time are a moving subset of the ladder. Dividing by that subset
+        sizes the early limits against a shorter ladder than the signal ends up
+        with, and the signal overshoots its budget. Falls back to the visible
+        count, and never trusts a declared size below it (would over-size)."""
         info = self._client.symbol_info(mt5_symbol)
         if info is None:
             logger.error("symbol_info unavailable for %s, using fixed_lot fallback", mt5_symbol)
             return self._get_fixed_lot(mt5_symbol)
+
+        n_limits = max(ladder_size or 0, len(limit_prices))
 
         # A matching exception takes precedence over the global mode.
         exception = self._resolve_exception(mt5_symbol, signal_type, channel_id)
@@ -126,17 +137,19 @@ class LotCalculator:
             if exception.mode == "fixed":
                 return _clamp(exception.value, info)
             if exception.mode == "total_lot":
-                return _clamp(exception.value / len(limit_prices), info)
-            return self._calc_risk_lot(exception.value, info, stop_loss, limit_prices, mt5_symbol)
+                return _clamp(exception.value / n_limits, info)
+            return self._calc_risk_lot(
+                exception.value, info, stop_loss, limit_prices, mt5_symbol, n_limits
+            )
 
         mode = self._config.lot_sizing.mode
         if mode == "fixed":
             return _clamp(self._get_fixed_lot(mt5_symbol), info)
         if mode == "total_lot":
-            return _clamp(self._get_total_lot(mt5_symbol) / len(limit_prices), info)
+            return _clamp(self._get_total_lot(mt5_symbol) / n_limits, info)
 
         return self._calc_risk_lot(
-            self._get_risk_percent(mt5_symbol), info, stop_loss, limit_prices, mt5_symbol
+            self._get_risk_percent(mt5_symbol), info, stop_loss, limit_prices, mt5_symbol, n_limits
         )
 
     def _calc_risk_lot(
@@ -146,6 +159,7 @@ class LotCalculator:
         stop_loss: float,
         limit_prices: list[float],
         mt5_symbol: str,
+        n_limits: int,
     ) -> float:
         account = self._client.account_info()
         if account is None:
@@ -166,6 +180,6 @@ class LotCalculator:
             logger.warning("Zero SL distance for %s, using volume_min", mt5_symbol)
             return _clamp(info.volume_min, info)
 
-        raw = (account.balance * risk_percent / 100) / (len(limit_prices) * avg_sl_pips * pip_val)
+        raw = (account.balance * risk_percent / 100) / (n_limits * avg_sl_pips * pip_val)
         capped = min(raw, self._config.lot_sizing.max_lot_per_order)
         return _clamp(capped, info)

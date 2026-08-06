@@ -134,6 +134,66 @@ def test_total_lot_exception_split_across_limits(mock_mt5) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ladder_size — the declared limit count drives the split, not the visible rows
+# ---------------------------------------------------------------------------
+
+
+def _gold_info():
+    return make_symbol_info(
+        name="XAUUSD",
+        digits=2,
+        point=0.01,
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
+        trade_tick_value=1.0,
+        trade_tick_size=0.01,
+        trade_contract_size=100.0,
+    )
+
+
+def test_total_lot_splits_by_declared_ladder_size(mock_mt5) -> None:
+    # Signal 3600: the TM posted seq 1 and 4 first, seq 2/3 landed 12s later. The
+    # first placement sees 2 of 4 prices but total_limits already says 4, so both
+    # batches size at 0.2/4 and the ladder totals the configured 0.2 (not 0.3).
+    cfg = _cfg_with_exceptions(LotExceptionConfig(symbol="XAUUSD", mode="total_lot", value=0.2))
+    mock_mt5.symbol_info.return_value = _gold_info()
+    calc = LotCalculator(mock_mt5, cfg)
+
+    first = calc.calculate(4324.5, [4305.2, 4314.5], "XAUUSD", "toll", ladder_size=4)
+    rest = calc.calculate(4324.5, [4305.2, 4314.5, 4307.3, 4312.2], "XAUUSD", "toll", ladder_size=4)
+
+    assert first == pytest.approx(0.05, abs=1e-6)
+    assert rest == pytest.approx(0.05, abs=1e-6)
+    assert first * 2 + rest * 2 == pytest.approx(0.2, abs=1e-6)
+
+
+def test_ladder_size_below_visible_count_is_ignored(mock_mt5) -> None:
+    # A stale/short declared count must never divide by less than what we can see.
+    cfg = _cfg_with_exceptions(LotExceptionConfig(symbol="XAUUSD", mode="total_lot", value=0.2))
+    mock_mt5.symbol_info.return_value = _gold_info()
+
+    calc = LotCalculator(mock_mt5, cfg)
+    lot = calc.calculate(4324.5, [4305.2, 4314.5, 4307.3, 4312.2], "XAUUSD", ladder_size=2)
+
+    assert lot == pytest.approx(0.05, abs=1e-6)
+
+
+def test_risk_percent_splits_by_declared_ladder_size(mock_mt5) -> None:
+    # Same staggered-insert protection for the risk_percent denominator:
+    # balance=10000, risk=1%, sl_pips=10, pip_val=10 → 100/(4*10*10) = 0.25.
+    mock_mt5.symbol_info.return_value = _make_eurusd_info()
+    mock_mt5.account_info.return_value = make_account_info(balance=10000.0)
+
+    calc = LotCalculator(mock_mt5, make_settings())
+    lot = calc.calculate(
+        stop_loss=1.09000, limit_prices=[1.09100], mt5_symbol="EURUSD", ladder_size=4
+    )
+
+    assert lot == pytest.approx(0.25, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # Volume step flooring (not rounding)
 # ---------------------------------------------------------------------------
 
