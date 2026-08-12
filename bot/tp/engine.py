@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import MetaTrader5 as mt5
 
-from bot.config.constants import BOT_VERSION, AssetClass
+from bot.config.constants import BOT_VERSION, MARKET_ORDER_TYPES, AssetClass
 from bot.config.settings import Settings
 from bot.db.sqlite import SQLiteDB
 from bot.db.tp_outcomes_writer import TPOutcomesWriter
@@ -74,6 +74,11 @@ class TPEngine:
             if row["mt5_ticket"] not in mt5_pos_map:
                 continue
             if row["signal_id"] in unmanaged_sids:
+                continue
+            # Instant entry: the sender's own take profit is already sitting on the
+            # broker as a hard TP, so this trade runs to that price or its stop. Trailing
+            # it would bank a fraction of a target the channel set deliberately.
+            if row["order_type"] in MARKET_ORDER_TYPES:
                 continue
             # SL stripped for spread-hour protection — leave it untouched (the sync
             # cycle owns stripping/restoring). Trailing would otherwise re-arm an SL.
@@ -277,9 +282,7 @@ class TPEngine:
             level_seq = (
                 newest_row["sequence_number"] if newest_row["sequence_number"] is not None else -1
             )
-            if not await sqlite.mark_trigger_recorded(
-                signal_id, mt5_account_login or 0, level_seq
-            ):
+            if not await sqlite.mark_trigger_recorded(signal_id, mt5_account_login or 0, level_seq):
                 return
 
             acct = mt5_client.account_info()

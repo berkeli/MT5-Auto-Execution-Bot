@@ -51,6 +51,20 @@ _STATUS_MAX_AGE_LEGACY = 2.0
 # broker sees as order spam.
 _PROXIMITY_EXIT_MULTIPLIER = 1.5
 
+# Instant-entry signals (a limit born 'hit' at the market price the TM saw, plus a fixed
+# take profit) are taken at market rather than rested as a limit, so both placement gates
+# are about how far reality has moved since the TM looked:
+#   - hit_time older than this and we're no longer entering the trade that was posted —
+#     a restart or a stalled cycle must not open a position on an hours-old signal.
+#   - price further than half the instrument's proximity threshold from the recorded
+#     entry and we'd be taking a materially different trade.
+_INSTANT_MAX_AGE_SECONDS = 60.0
+_INSTANT_PROXIMITY_MULTIPLIER = 0.5
+
+
+def _is_instant(row) -> bool:
+    return row["take_profit"] is not None
+
 
 def _within_proximity(
     limit_prices: list[float],
@@ -214,6 +228,9 @@ class SyncCycle:
         self._logged_already_filled: set[int] = set()
         # signal_ids skipped by the limit-count gate (logged once per lifetime)
         self._logged_limit_skips: set[int] = set()
+        # limit_ids of instant entries that went stale before we could take them
+        # (logged once per lifetime — the row stays in the fetch until the TM closes it)
+        self._logged_stale_instant: set[int] = set()
         # SL sync consecutive failure tracking
         self._sl_fail_count: dict[int, int] = {}  # ticket -> consecutive fail count
         self._sl_fail_target: dict[int, float] = {}  # ticket -> last failed target sl
@@ -612,9 +629,12 @@ class SyncCycle:
             )
 
             # Snapshot for the dashboard's "Closest Signals" view. Re-query pending
-            # so newly-placed orders from this cycle appear as placed=True.
+            # so newly-placed orders from this cycle appear as placed=True. Instant
+            # entries are left out: they are never waiting on a level, so they'd sit
+            # in the watch list at zero distance for the life of the trade — the
+            # position itself is what the user should see.
             sqlite_pending_now = await sqlite.get_pending_orders()
-            self.last_supabase_rows = list(supabase_rows)
+            self.last_supabase_rows = [r for r in supabase_rows if not _is_instant(r)]
             self.last_live_prices = live_prices
             self.last_sqlite_pending_limit_ids = {r["limit_id"] for r in sqlite_pending_now}
 
@@ -776,6 +796,42 @@ class SyncCycle:
                 lid,
                 row["signal_id"],
                 row["instrument"],
+            )
+
+        # An instant entry is only the trade that was posted for as long as the market
+        # is still roughly where the TM saw it. Past that the row keeps coming back in
+        # the fetch (its signal stays live until TP/SL), so it must be dropped on age.
+        # A NULL hit_time is the sub-second gap between the TM inserting the limit and
+        # marking it hit: not stale, just not ready, so it waits for the next cycle.
+        instant_ages = {
+            lid: (
+                None
+                if by_limit[lid]["hit_time"] is None
+                else (ctx.now - by_limit[lid]["hit_time"]).total_seconds()
+            )
+            for lid in new_limit_ids
+            if _is_instant(by_limit[lid])
+        }
+        new_limit_ids -= {
+            lid
+            for lid, age in instant_ages.items()
+            if age is None or age > _INSTANT_MAX_AGE_SECONDS
+        }
+        for lid, age in instant_ages.items():
+            if age is None or age <= _INSTANT_MAX_AGE_SECONDS:
+                continue
+            if lid in self._logged_stale_instant:
+                continue
+            self._logged_stale_instant.add(lid)
+            row = by_limit[lid]
+            logger.info(
+                "Skipping instant entry limit_id=%d signal_id=%d (%s) — recorded %.0fs ago, "
+                "past the %.0fs entry window",
+                lid,
+                row["signal_id"],
+                row["instrument"],
+                age,
+                _INSTANT_MAX_AGE_SECONDS,
             )
 
         # Drop blocked symbols (spread hour / weekend / news mode) from the
@@ -991,8 +1047,18 @@ class SyncCycle:
             else:
                 mid = (tick.bid + tick.ask) / 2
             new_prices = [float(ctx.supabase_by_limit[lid]["price_level"]) for lid in lids]
+            # An instant entry's price_level is the fill the TM recorded, not a level to
+            # wait for, so the band is halved: we're measuring how far price has already
+            # slipped from that entry, not how soon a resting limit might be reached.
+            multiplier = _INSTANT_PROXIMITY_MULTIPLIER if _is_instant(row0) else 1.0
             if _within_proximity(
-                new_prices, mid, detect_asset_class(db_sym), info, config.proximity, db_sym
+                new_prices,
+                mid,
+                detect_asset_class(db_sym),
+                info,
+                config.proximity,
+                db_sym,
+                multiplier,
             ):
                 approved_signals.add(sig_id)
                 self._logged_proximity.discard(sig_id)
@@ -1106,23 +1172,42 @@ class SyncCycle:
             risky_sl = ctx.risky_sl_by_signal.get(sig_id)
             db_sl = risky_sl if risky_sl is not None else float(row["stop_loss"])
 
-            outcome = await self._placer.place_order(
-                signal_id=sig_id,
-                limit_id=lid,
-                direction=row["direction"],
-                db_stop_loss=db_sl,
-                db_price=float(row["price_level"]),
-                signal_type=row["signal_type"] or "standard",
-                mt5_symbol=mt5_sym,
-                lot=lot,
-                offset=offset,
-                mt5_client=mt5_client,
-                sqlite=sqlite,
-                supabase=supabase,
-                channel_id=row["channel_id"],
-                sequence_number=row["sequence_number"],
-                ladder_size=row["total_limits"],
-            )
+            if _is_instant(row):
+                outcome = await self._placer.place_market_order(
+                    signal_id=sig_id,
+                    limit_id=lid,
+                    direction=row["direction"],
+                    db_stop_loss=db_sl,
+                    db_take_profit=float(row["take_profit"]),
+                    db_price=float(row["price_level"]),
+                    signal_type=row["signal_type"] or "standard",
+                    mt5_symbol=mt5_sym,
+                    lot=lot,
+                    offset=offset,
+                    mt5_client=mt5_client,
+                    sqlite=sqlite,
+                    supabase=supabase,
+                    channel_id=row["channel_id"],
+                    sequence_number=row["sequence_number"],
+                )
+            else:
+                outcome = await self._placer.place_order(
+                    signal_id=sig_id,
+                    limit_id=lid,
+                    direction=row["direction"],
+                    db_stop_loss=db_sl,
+                    db_price=float(row["price_level"]),
+                    signal_type=row["signal_type"] or "standard",
+                    mt5_symbol=mt5_sym,
+                    lot=lot,
+                    offset=offset,
+                    mt5_client=mt5_client,
+                    sqlite=sqlite,
+                    supabase=supabase,
+                    channel_id=row["channel_id"],
+                    sequence_number=row["sequence_number"],
+                    ladder_size=row["total_limits"],
+                )
             if outcome == "placed":
                 result.placed += 1
             elif outcome == "skipped":

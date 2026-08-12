@@ -41,7 +41,9 @@
     "COST.NAS"
   ],
   "excluded_symbols": [],
-  "disabled_channels": [],
+  "disabled_channels": [
+    "1536971699201773608"
+  ],
   "offset_instruments": [
     "SPX500USD",
     "NAS100USD",

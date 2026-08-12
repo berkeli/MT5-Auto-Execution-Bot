@@ -7,6 +7,7 @@ from bot.db.queries import (
     FETCH_FEED_HEALTH,
     FETCH_LIVE_PRICES,
     FETCH_SIGNAL_SETS,
+    FETCH_SIGNAL_SETS_LEGACY,
     FETCH_SIGNAL_STATUS,
     FETCH_SIGNAL_STATUSES,
     FETCH_SYNC_STATE,
@@ -41,6 +42,7 @@ class SupabaseDB:
         self._dsn = dsn
         self._pool: asyncpg.Pool | None = None
         self._sync_state_legacy = False
+        self._signal_sets_legacy = False
 
     @property
     def is_connected(self) -> bool:
@@ -98,13 +100,20 @@ class SupabaseDB:
         active+pending rows to place, the TM-marked 'hit' limit ids to spare from
         stale-cancel, and the {limit_id: signal_id} map for 'profit'-marked signals.
         The 'profit' branch is scoped to held_signal_ids (the caller's currently-filled
-        signals) — every other profit row would be discarded downstream anyway."""
+        signals) — every other profit row would be discarded downstream anyway.
+
+        Instant-entry limits ride in the placeable set despite being 'hit': the TM marks
+        them hit the moment it records the market price it saw, so 'pending' is a state
+        they never occupy. The sync cycle tells them apart by take_profit and enters at
+        market instead of resting a limit.
+        """
         async with self._acquire() as conn:
-            rows = await conn.fetch(FETCH_SIGNAL_SETS, held_signal_ids)
+            rows = await self._fetch_sets(conn, held_signal_ids)
         active = [
             r
             for r in rows
-            if r["signal_status"] in ("active", "hit") and r["limit_status"] == "pending"
+            if r["signal_status"] in ("active", "hit")
+            and (r["limit_status"] == "pending" or r["take_profit"] is not None)
         ]
         hit_limit_ids = {
             r["limit_id"]
@@ -115,6 +124,18 @@ class SupabaseDB:
             r["limit_id"]: r["signal_id"] for r in rows if r["signal_status"] == "profit"
         }
         return active, hit_limit_ids, profit_limit_signal
+
+    async def _fetch_sets(self, conn, held_signal_ids: list[int]) -> list[asyncpg.Record]:
+        if self._signal_sets_legacy:
+            return await conn.fetch(FETCH_SIGNAL_SETS_LEGACY, held_signal_ids)
+        try:
+            return await conn.fetch(FETCH_SIGNAL_SETS, held_signal_ids)
+        except asyncpg.exceptions.UndefinedColumnError:
+            # DB not yet migrated (TM restart pending) — fall back for the process
+            # lifetime rather than failing every sync cycle on the missing column.
+            self._signal_sets_legacy = True
+            logger.warning("signals.take_profit missing — instant-entry signals disabled")
+            return await conn.fetch(FETCH_SIGNAL_SETS_LEGACY, held_signal_ids)
 
     async def fetch_live_prices(self, symbols: list[str]) -> dict[str, asyncpg.Record]:
         async with self._acquire() as conn:

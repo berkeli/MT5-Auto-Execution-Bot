@@ -12,12 +12,17 @@
 #     $1 (the caller's currently-filled signal ids) — the caller discards every profit row
 #     whose signal it isn't holding, so pulling the unbounded historical set (which grows
 #     forever and blew pooler egress) is pure waste. Empty array => no profit rows.
+#
+# s.take_profit and l.hit_time serve the instant-entry channels: their single limit is
+# born 'hit' at the market price the TM observed, so hit_time bounds how late we may
+# still enter and take_profit is the fixed exit price (see SyncCycle instant entry).
 FETCH_SIGNAL_SETS = """
 SELECT
     s.id              AS signal_id,
     s.instrument,
     s.direction,
     s.stop_loss,
+    s.take_profit,
     s.status          AS signal_status,
     s.type            AS signal_type,
     s.channel_id,
@@ -26,13 +31,21 @@ SELECT
     l.id              AS limit_id,
     l.price_level,
     l.sequence_number,
-    l.status          AS limit_status
+    l.status          AS limit_status,
+    l.hit_time
 FROM signals s
 JOIN limits l ON l.signal_id = s.id
 WHERE (s.status IN ('active', 'hit') AND l.status IN ('pending', 'hit'))
    OR (s.status = 'profit' AND s.id = ANY($1::bigint[]))
 ORDER BY s.id, l.sequence_number
 """
+
+# Fallback for a DB that predates signals.take_profit (TM not yet migrated). Without it
+# the whole sync cycle would die on every fetch, not just instant entry — so the column
+# is substituted as NULL, which reads as "no instant-entry signals exist".
+FETCH_SIGNAL_SETS_LEGACY = FETCH_SIGNAL_SETS.replace(
+    "    s.take_profit,", "    NULL::DOUBLE PRECISION AS take_profit,"
+)
 
 FETCH_LIVE_PRICES = """
 SELECT symbol, bid, ask, feed, updated_at

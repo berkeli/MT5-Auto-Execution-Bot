@@ -306,7 +306,7 @@ async def test_run_cycle_records_trigger_outcome(sqlite_db, mock_mt5, sample_con
 # ---------------------------------------------------------------------------
 
 
-async def _insert_below_threshold_gold(sqlite_db, mock_mt5) -> None:
+async def _insert_below_threshold_gold(sqlite_db, mock_mt5, order_type="buy_limit") -> None:
     # XAUUSD long: entry 4459, bid 4460 → move 1.0, well under the metals threshold 4.0.
     pos = make_position(
         ticket=1001, symbol="XAUUSD", price_open=4459.0, volume=0.3, type=0, profit=2.0
@@ -323,7 +323,7 @@ async def _insert_below_threshold_gold(sqlite_db, mock_mt5) -> None:
         limit_id=1,
         signal_id=7,
         mt5_ticket=1001,
-        order_type="buy_limit",
+        order_type=order_type,
         lot_size=0.3,
         placed_at="2026-01-01T00:00:00+00:00",
         db_stop_loss=4440.0,
@@ -363,6 +363,22 @@ async def test_server_tp_ignored_when_follow_disabled(sqlite_db, mock_mt5, sampl
     await engine.run_cycle(mock_mt5, sqlite_db, sample_config, server_tp_signals={7})
 
     mock_mt5.close_position.assert_not_called()
+
+
+async def test_instant_entry_position_is_left_to_its_broker_tp(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    # An instant entry carries the sender's take profit on the broker. Even well past
+    # the local threshold, and even when the server calls TP, the engine must not trail
+    # or partially close it — that would bank a fraction of a deliberate target.
+    await _insert_below_threshold_gold(sqlite_db, mock_mt5, order_type="buy_market")
+    mock_mt5.symbol_info_tick.return_value = make_tick(symbol="XAUUSD", bid=4480.0, ask=4480.2)
+    sample_config.tp_config.follow_server_tp = True
+
+    await TPEngine().run_cycle(mock_mt5, sqlite_db, sample_config, server_tp_signals={7})
+
+    mock_mt5.close_position.assert_not_called()
+    assert await sqlite_db.get_trailing_positions() == []
 
 
 async def test_follow_server_tp_tags_outcome_strategy(sqlite_db, mock_mt5, sample_config) -> None:

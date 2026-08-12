@@ -136,25 +136,7 @@ class OrderPlacer:
 
         result = mt5_client.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            retcode = result.retcode if result else "None"
-            if result is not None and result.retcode == mt5.TRADE_RETCODE_MARKET_CLOSED:
-                # Market closed — retries when the session reopens. Expected, not a hard
-                # error; log at most once per interval per limit instead of every cycle.
-                now = time.monotonic()
-                if (
-                    now - self._market_closed_log_ts.get(limit_id, 0.0)
-                    >= _MARKET_CLOSED_LOG_INTERVAL
-                ):
-                    self._market_closed_log_ts[limit_id] = now
-                    logger.warning(
-                        "Placement deferred (market closed): signal=%d limit=%d",
-                        signal_id,
-                        limit_id,
-                    )
-            else:
-                logger.error(
-                    "Placement failed: signal=%d limit=%d retcode=%s", signal_id, limit_id, retcode
-                )
+            self._log_send_failure(result, signal_id, limit_id)
             await sqlite.delete_claimed_order(limit_id)
             return "error"
 
@@ -190,3 +172,142 @@ class OrderPlacer:
             lot,
         )
         return "placed"
+
+    async def place_market_order(
+        self,
+        signal_id: int,
+        limit_id: int,
+        direction: str,
+        db_stop_loss: float,
+        db_take_profit: float,
+        db_price: float,
+        signal_type: str,
+        mt5_symbol: str,
+        lot: float,
+        offset: float | None,
+        mt5_client: MT5Client,
+        sqlite: SQLiteDB,
+        supabase: SupabaseDB,
+        channel_id: int | None = None,
+        sequence_number: int | None = None,
+    ) -> PlacementOutcome:
+        """Enter an instant-entry signal at the market, carrying the sender's fixed take
+        profit onto the broker as a hard TP.
+
+        Both stops are exact frame conversions of the feed price: `+ offset` puts them in
+        the broker's mid frame, which sits half a spread inside the bid (long) / ask
+        (short) the broker actually triggers on — the same half-spread cushion the resting
+        SL of a limit order gets from its full-spread shift.
+        """
+        tick = mt5_client.symbol_info_tick(mt5_symbol)
+        if tick is None:
+            logger.error("No tick for %s (signal=%d limit=%d)", mt5_symbol, signal_id, limit_id)
+            return "error"
+
+        info = mt5_client.symbol_info(mt5_symbol)
+        if info is None:
+            logger.error("No symbol_info for %s", mt5_symbol)
+            return "error"
+
+        shift = offset or 0.0
+        adj_sl = round(db_stop_loss + shift, info.digits)
+        adj_tp = round(db_take_profit + shift, info.digits)
+        if direction == "long":
+            entry, order_type, order_type_str = tick.ask, mt5.ORDER_TYPE_BUY, "buy_market"
+        else:
+            entry, order_type, order_type_str = tick.bid, mt5.ORDER_TYPE_SELL, "sell_market"
+
+        # Price already outside the signal's own SL↔TP band: the position would open only
+        # to close on the next tick. The TM applies the same test before it records the
+        # entry, but price keeps moving in the seconds before we see the row.
+        low, high = sorted((adj_sl, adj_tp))
+        if not low < entry < high:
+            logger.info(
+                "Skipping signal=%d limit=%d %s: market %.5f outside SL %.5f / TP %.5f",
+                signal_id,
+                limit_id,
+                mt5_symbol,
+                entry,
+                adj_sl,
+                adj_tp,
+            )
+            return "skipped"
+
+        placed_at = datetime.now(UTC).isoformat()
+        await sqlite.insert_claimed_order(
+            limit_id=limit_id,
+            signal_id=signal_id,
+            order_type=order_type_str,
+            lot_size=lot,
+            placed_at=placed_at,
+            db_stop_loss=db_stop_loss,
+            signal_type=signal_type,
+            feed_price=db_price,
+            mt5_price=entry,
+            offset=offset,
+            symbol=mt5_symbol,
+            channel_id=channel_id,
+            sequence_number=sequence_number,
+            ladder_size=1,
+        )
+
+        status = await supabase.fetch_signal_status(signal_id)
+        if status not in _ACTIVE_SIGNAL_STATUSES:
+            logger.warning(
+                "Pre-send abort: signal=%d status=%r — market entry cancelled", signal_id, status
+            )
+            await sqlite.delete_claimed_order(limit_id)
+            return "error"
+
+        request = OrderRequest(
+            action=mt5.TRADE_ACTION_DEAL,
+            symbol=mt5_symbol,
+            volume=lot,
+            type=order_type,
+            price=entry,
+            sl=adj_sl,
+            tp=adj_tp,
+            magic=MAGIC_NUMBER,
+            comment=f"s{signal_id}_l{limit_id}"[:32],
+            type_filling=mt5_client.resolve_filling(mt5_symbol),
+        )
+
+        result = mt5_client.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            self._log_send_failure(result, signal_id, limit_id)
+            await sqlite.delete_claimed_order(limit_id)
+            return "error"
+
+        # Left 'pending' for the fill sweep later in this same cycle: the deal already
+        # executed, but detect_fills is what reconciles our ticket to the position's.
+        await sqlite.promote_claimed_to_pending(limit_id, result.ticket)
+        logger.info(
+            "Entered %s ticket=%d signal=%d limit=%d price=%.5f lot=%.2f sl=%.5f tp=%.5f",
+            order_type_str,
+            result.ticket,
+            signal_id,
+            limit_id,
+            result.price,
+            lot,
+            adj_sl,
+            adj_tp,
+        )
+        return "placed"
+
+    def _log_send_failure(self, result, signal_id: int, limit_id: int) -> None:
+        if result is not None and result.retcode == mt5.TRADE_RETCODE_MARKET_CLOSED:
+            # Market closed — retries when the session reopens. Expected, not a hard
+            # error; log at most once per interval per limit instead of every cycle.
+            now = time.monotonic()
+            if now - self._market_closed_log_ts.get(limit_id, 0.0) >= _MARKET_CLOSED_LOG_INTERVAL:
+                self._market_closed_log_ts[limit_id] = now
+                logger.warning(
+                    "Placement deferred (market closed): signal=%d limit=%d", signal_id, limit_id
+                )
+            return
+        logger.error(
+            "Placement failed: signal=%d limit=%d retcode=%s",
+            signal_id,
+            limit_id,
+            result.retcode if result else "None",
+        )

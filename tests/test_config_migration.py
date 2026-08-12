@@ -17,6 +17,7 @@ from bot.config.settings import (
     _MIGRATION_PARTIAL_CLOSE_50,
     _MIGRATION_PROXIMITY_BUMP,
     _MIGRATION_RISKY_GOLD_ENABLED,
+    _MIGRATION_SEMI_SWING_PA_DISABLED,
     _MIGRATION_SPREAD_HOUR_LATE,
     _MIGRATION_STOCK_PROXIMITY,
     _MIGRATION_STOCK_SPREAD_EARLY,
@@ -29,6 +30,7 @@ from bot.config.settings import (
     _OANDA_INDEX_TP,
     _OFFSET_BACKFILL_SYMBOLS,
     _RISKY_GOLD_CHANNEL_ID,
+    _SEMI_SWING_PA_CHANNEL_ID,
     _SHIPPED_GOLD_EXCEPTION,
     _STOCK_PROXIMITY_OVERRIDES,
     _TP_INSTRUMENT_OVERRIDES,
@@ -371,17 +373,8 @@ def test_risky_gold_channel_enabled_on_update(tmp_path) -> None:
 
     data = _read(cfg)
     assert _RISKY_GOLD_CHANNEL_ID not in data["disabled_channels"]
-    assert data["disabled_channels"] == ["1512881096650391582"]  # other channels untouched
+    assert "1512881096650391582" in data["disabled_channels"]  # other channels untouched
     assert _MIGRATION_RISKY_GOLD_ENABLED in data["config_migrations"]
-
-
-def test_risky_gold_enable_leaves_list_absent(tmp_path) -> None:
-    cfg = tmp_path / "config.json"
-    _write(cfg, {})
-
-    migrate_config(cfg)
-
-    assert "disabled_channels" not in _read(cfg)
 
 
 def test_risky_gold_enable_is_idempotent_and_respects_redisable(tmp_path) -> None:
@@ -395,7 +388,46 @@ def test_risky_gold_enable_is_idempotent_and_respects_redisable(tmp_path) -> Non
     _write(cfg, data)
 
     migrate_config(cfg)
-    assert _read(cfg)["disabled_channels"] == [_RISKY_GOLD_CHANNEL_ID]  # not re-removed
+    assert _RISKY_GOLD_CHANNEL_ID in _read(cfg)["disabled_channels"]  # not re-removed
+
+
+def test_semi_swing_pa_channel_disabled_on_update(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    _write(cfg, {"disabled_channels": ["1512881096650391582"]})
+
+    migrate_config(cfg)
+
+    data = _read(cfg)
+    assert data["disabled_channels"] == ["1512881096650391582", _SEMI_SWING_PA_CHANNEL_ID]
+    assert _MIGRATION_SEMI_SWING_PA_DISABLED in data["config_migrations"]
+
+
+def test_semi_swing_pa_disabled_when_list_absent(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    _write(cfg, {})
+
+    migrate_config(cfg)
+
+    # No list at all means every channel is on, so the opt-in channel must still be
+    # written out — otherwise an existing install silently starts trading it.
+    assert _read(cfg)["disabled_channels"] == [_SEMI_SWING_PA_CHANNEL_ID]
+
+
+def test_semi_swing_pa_respects_reenable(tmp_path) -> None:
+    cfg = tmp_path / "config.json"
+    _write(cfg, {})
+    migrate_config(cfg)
+
+    # User ticks the channel on after the one-time migration.
+    _write(cfg, {**_read(cfg), "disabled_channels": []})
+
+    migrate_config(cfg)
+    assert _read(cfg)["disabled_channels"] == []
+
+
+def test_semi_swing_pa_ships_disabled_in_template() -> None:
+    shipped = json.loads(_EXAMPLE_CONFIG.read_text())["disabled_channels"]
+    assert _SEMI_SWING_PA_CHANNEL_ID in shipped
 
 
 def test_stock_proximity_replaces_bare_keys_with_canonical(tmp_path) -> None:

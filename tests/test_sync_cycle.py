@@ -1,6 +1,7 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
+import MetaTrader5 as mt5
 import pytest
 
 from bot.config.settings import ExcludedChannelAssetConfig, SymbolSuffixRule
@@ -16,7 +17,13 @@ from tests.conftest import (
 
 
 def _make_supabase_row(
-    limit_id=1, signal_id=1, instrument="EURUSD", signal_status="active", total_limits=1
+    limit_id=1,
+    signal_id=1,
+    instrument="EURUSD",
+    signal_status="active",
+    total_limits=1,
+    take_profit=None,
+    hit_time=None,
 ) -> dict:
     return {
         "limit_id": limit_id,
@@ -30,6 +37,8 @@ def _make_supabase_row(
         "channel_id": None,
         "sequence_number": 1,
         "total_limits": total_limits,
+        "take_profit": take_profit,
+        "hit_time": hit_time,
     }
 
 
@@ -275,6 +284,208 @@ async def test_replaced_limit_reuses_filled_sibling_lot(sqlite_db, mock_mt5, sam
 
     assert result.placed == 1
     assert mock_mt5.order_send.call_args.args[0].volume == 0.33
+
+
+# ---------------------------------------------------------------------------
+# Instant entry: signals whose single limit is born 'hit' at the market price
+# ---------------------------------------------------------------------------
+
+
+def _make_instant_row(limit_id=1, signal_id=1, age_seconds=0.0, **overrides) -> dict:
+    row = _make_supabase_row(limit_id=limit_id, signal_id=signal_id, signal_status="hit")
+    row.update(
+        price_level=1.10000,  # the entry the TM recorded; mock tick mid is 1.10001
+        stop_loss=1.09500,
+        take_profit=1.10500,
+        signal_type="pa",
+        hit_time=datetime.now(UTC) - timedelta(seconds=age_seconds),
+    )
+    row.update(overrides)
+    return row
+
+
+def _instant_supabase(rows) -> AsyncMock:
+    sb = _mock_supabase(signals=rows, hit_limit_ids=[r["limit_id"] for r in rows])
+    sb.fetch_signal_status.return_value = "hit"
+    return sb
+
+
+async def test_instant_signal_enters_at_market_with_fixed_tp(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    mock_mt5.account_info.return_value = make_account_info()
+    mock_mt5.order_send.return_value = make_order_result(ticket=7001)
+    mock_mt5.resolve_filling.return_value = mt5.ORDER_FILLING_IOC
+
+    cycle = SyncCycle()
+    result = await cycle.run(
+        _instant_supabase([_make_instant_row()]),
+        sqlite_db,
+        mock_mt5,
+        sample_config,
+        _mock_scheduler(),
+    )
+
+    assert result.placed == 1
+    request = mock_mt5.order_send.call_args.args[0]
+    assert request.action == mt5.TRADE_ACTION_DEAL
+    assert request.type == mt5.ORDER_TYPE_BUY
+    assert request.price == 1.10002  # ask — a long pays the offer
+    assert request.sl == 1.09500
+    assert request.tp == 1.10500  # the sender's price rides on the broker
+
+    row = await sqlite_db.get_order_by_ticket(7001)
+    assert row["order_type"] == "buy_market"
+
+
+async def test_instant_signal_skipped_when_stale(sqlite_db, mock_mt5, sample_config) -> None:
+    # A restart hours later must not open a position on a signal that is still live in
+    # the DB — the market has long since left the price the TM recorded.
+    mock_mt5.account_info.return_value = make_account_info()
+
+    cycle = SyncCycle()
+    result = await cycle.run(
+        _instant_supabase([_make_instant_row(age_seconds=3600)]),
+        sqlite_db,
+        mock_mt5,
+        sample_config,
+        _mock_scheduler(),
+    )
+
+    assert result.placed == 0
+    mock_mt5.order_send.assert_not_called()
+    assert 1 in cycle._logged_stale_instant
+
+
+async def test_instant_signal_waits_for_hit_time(sqlite_db, mock_mt5, sample_config) -> None:
+    # The TM writes the limit row a beat before it marks it hit. Entering off a NULL
+    # hit_time would mean entering blind to how old the recorded price is.
+    mock_mt5.account_info.return_value = make_account_info()
+
+    cycle = SyncCycle()
+    result = await cycle.run(
+        _instant_supabase([_make_instant_row(hit_time=None)]),
+        sqlite_db,
+        mock_mt5,
+        sample_config,
+        _mock_scheduler(),
+    )
+
+    assert result.placed == 0
+    mock_mt5.order_send.assert_not_called()
+    assert cycle._logged_stale_instant == set()  # not stale, just not ready yet
+
+
+@pytest.mark.parametrize("instant, expected_placed", [(True, 0), (False, 1)])
+async def test_instant_signal_uses_half_the_proximity_band(
+    sqlite_db, mock_mt5, sample_config, instant, expected_placed
+) -> None:
+    # 10 pips from the market: inside the 15-pip forex proximity a resting ladder is
+    # armed at, but outside the halved band an instant entry gets — at that distance
+    # we would be taking a materially different trade than the one posted.
+    mock_mt5.account_info.return_value = make_account_info()
+    mock_mt5.order_send.return_value = make_order_result(ticket=7001)
+    mock_mt5.order_get_by_ticket.return_value = None
+    row = _make_instant_row(price_level=1.09901)
+    if not instant:
+        row["take_profit"] = None
+
+    cycle = SyncCycle()
+    result = await cycle.run(
+        _instant_supabase([row]), sqlite_db, mock_mt5, sample_config, _mock_scheduler()
+    )
+
+    assert result.placed == expected_placed
+
+
+async def test_instant_signal_skipped_when_market_outside_band(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    # Price has already run past the take profit: the position would open only to close
+    # on the next tick. Proximity still passes, so only the band check catches this.
+    mock_mt5.account_info.return_value = make_account_info()
+
+    cycle = SyncCycle()
+    result = await cycle.run(
+        _instant_supabase([_make_instant_row(take_profit=1.10001)]),
+        sqlite_db,
+        mock_mt5,
+        sample_config,
+        _mock_scheduler(),
+    )
+
+    assert result.placed == 0
+    assert result.skipped == 1
+    mock_mt5.order_send.assert_not_called()
+
+
+async def test_instant_signal_not_re_entered_after_close(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    # The TM leaves the signal live until its own TP/SL fires, so the row keeps coming
+    # back. Once our position is closed it must never be re-entered.
+    await sqlite_db.insert_order(
+        limit_id=1,
+        signal_id=1,
+        mt5_ticket=7001,
+        order_type="buy_market",
+        lot_size=0.1,
+        placed_at="2026-01-01T00:00:00+00:00",
+        db_stop_loss=1.09500,
+        signal_type="pa",
+    )
+    await sqlite_db.mark_filled(7001, "2026-01-01T00:00:01+00:00")
+    await sqlite_db.mark_closed(7001, 25.0)
+    mock_mt5.account_info.return_value = make_account_info()
+
+    cycle = SyncCycle()
+    result = await cycle.run(
+        _instant_supabase([_make_instant_row()]),
+        sqlite_db,
+        mock_mt5,
+        sample_config,
+        _mock_scheduler(),
+    )
+
+    assert result.placed == 0
+    mock_mt5.order_send.assert_not_called()
+
+
+async def test_instant_signal_blocked_by_disabled_channel(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    sample_config.disabled_channels = ["1536971699201773608"]
+    mock_mt5.account_info.return_value = make_account_info()
+
+    cycle = SyncCycle()
+    result = await cycle.run(
+        _instant_supabase([_make_instant_row(channel_id=1536971699201773608)]),
+        sqlite_db,
+        mock_mt5,
+        sample_config,
+        _mock_scheduler(),
+    )
+
+    assert result.placed == 0
+    mock_mt5.order_send.assert_not_called()
+
+
+async def test_instant_signal_kept_out_of_watch_list(sqlite_db, mock_mt5, sample_config) -> None:
+    # An instant entry is never waiting on a level, so it must not sit in the
+    # dashboard's "Closest Signals" view alongside genuine resting ladders.
+    mock_mt5.account_info.return_value = make_account_info()
+    mock_mt5.order_send.return_value = make_order_result(ticket=7001)
+
+    cycle = SyncCycle()
+    await cycle.run(
+        _instant_supabase([_make_instant_row(), _make_supabase_row(limit_id=2, signal_id=2)]),
+        sqlite_db,
+        mock_mt5,
+        sample_config,
+        _mock_scheduler(),
+    )
+
+    assert [r["limit_id"] for r in cycle.last_supabase_rows] == [2]
 
 
 async def test_tp_fired_signal_limit_not_replaced(sqlite_db, mock_mt5, sample_config) -> None:

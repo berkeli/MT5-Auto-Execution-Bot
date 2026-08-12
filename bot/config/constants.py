@@ -7,6 +7,11 @@ _PRODUCTION_UPDATE_MANIFEST_URL: str = ""
 MAGIC_NUMBER: int = 20250001
 BOT_VERSION: str = "1.6.4"
 
+# order_mappings.order_type values written by an instant-entry market fill. The
+# sender's own take profit rides on the broker as a hard TP, so the local TP engine
+# leaves these positions alone — this set is how it recognises them.
+MARKET_ORDER_TYPES: frozenset[str] = frozenset({"buy_market", "sell_market"})
+
 
 class AssetClass(str, Enum):
     FOREX = "forex"

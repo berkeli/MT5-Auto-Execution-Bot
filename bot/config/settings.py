@@ -85,6 +85,14 @@ _MIGRATION_SYMBOL_MAP_BACKFILL = "symbol_map_backfill_v1"
 _RISKY_GOLD_CHANNEL_ID = "1522144546299838524"
 _MIGRATION_RISKY_GOLD_ENABLED = "risky_gold_channel_enable_v1"
 
+# "Semi-Swing PA" posts instant-entry signals: the bot takes them at market with the
+# sender's fixed take profit as a hard broker TP instead of resting a limit ladder. It
+# ships opt-in — off in config.example.json for new installs, and added to
+# disabled_channels once here for existing ones. Applied once, so a user who then ticks
+# the channel on keeps it on.
+_SEMI_SWING_PA_CHANNEL_ID = "1536971699201773608"
+_MIGRATION_SEMI_SWING_PA_DISABLED = "semi_swing_pa_channel_disabled_v1"
+
 # Move the stock spread-hour windows earlier (both to 15:40) for existing installs. The
 # old sl_strip_stock_start (15:55) fired after the broker had already shut the symbol at
 # the 16:00 close, so the SL strip was rejected with MARKET_CLOSED; 15:40 lands while the
@@ -849,6 +857,17 @@ def migrate_config(path: Path = _CONFIG_PATH) -> None:
             gold["toll"] = dict(_GOLD_TOLL_TP)
             data["tp_config"] = tp
         applied.append(_MIGRATION_GOLD_TOLL_TP)
+        data["config_migrations"] = applied
+        changed = True
+
+    if _MIGRATION_SEMI_SWING_PA_DISABLED not in applied:
+        disabled = data.get("disabled_channels")
+        if not isinstance(disabled, list):
+            disabled = []
+        if _SEMI_SWING_PA_CHANNEL_ID not in disabled:
+            disabled.append(_SEMI_SWING_PA_CHANNEL_ID)
+        data["disabled_channels"] = disabled
+        applied.append(_MIGRATION_SEMI_SWING_PA_DISABLED)
         data["config_migrations"] = applied
         changed = True
 
