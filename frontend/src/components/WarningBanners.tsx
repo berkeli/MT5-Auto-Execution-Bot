@@ -49,9 +49,10 @@ function zonedTimeToLocalLabel(hhmm: string, tz: string): string {
 function buildBanners(status: StatusData | null, config: Config | null): BannerDef[] {
   const banners: BannerDef[] = []
 
-  // Two consecutive windows share the same underlying gate. The earlier
-  // daily_start..sl_strip_start slice ("late-market") only cancels/blocks pending
-  // orders; the sl_strip_start..daily_end slice ("spread hour") also strips SLs.
+  // Two consecutive windows, one gate. The earlier daily_start..sl_strip_start slice
+  // ("late-market") only blocks new orders — working limits and filled positions carry
+  // on. The sl_strip_start..daily_end slice ("spread hour") is the teardown: pendings
+  // cancelled, SLs stripped, TP engine crypto-only.
   if (status?.sl_strip_active) {
     const sh = config?.spread_hour
     const window =
@@ -74,7 +75,7 @@ function buildBanners(status: StatusData | null, config: Config | null): BannerD
       id: 'late-market',
       tone: 'warn',
       title: window ? `Late-market window (${window})` : 'Late-market window',
-      text: 'Pending orders are cancelled and new orders are blocked to avoid late-market activations. Stop-losses on filled positions stay in place until spread hour. Crypto is exempt.',
+      text: 'New orders are blocked to avoid late-market activations. Filled positions stay active until spread hour. Crypto is exempt.',
     })
   }
 
