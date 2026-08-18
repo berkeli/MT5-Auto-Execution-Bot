@@ -1,8 +1,14 @@
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytz
 
 from bot.config.settings import SpreadHourConfig
+
+# Risky positions must be *flat before* a disabled window opens, not closed at its edge:
+# the window exists to dodge a scheduled event, and closing on the boundary races it. So
+# the gate opens a minute early — placement blocked, pendings pulled, filled positions
+# swept — while the close edge stays exact, so risky re-arms exactly when configured.
+_RISKY_EXIT_LEAD = timedelta(minutes=1)
 
 _DAY_MAP = {
     "monday": 0,
@@ -27,9 +33,15 @@ def _parse_time(s: str) -> time:
     return time(int(h), int(m))
 
 
-def _parse_window(s: str) -> tuple[time, time]:
+def _risky_window(s: str) -> tuple[time, time]:
+    """Parse "HH:MM-HH:MM", opening _RISKY_EXIT_LEAD early (see the constant)."""
     start, end = s.split("-")
-    return _parse_time(start), _parse_time(end)
+    return _shift(_parse_time(start), _RISKY_EXIT_LEAD), _parse_time(end)
+
+
+def _shift(t: time, delta: timedelta) -> time:
+    """Move a wall-clock time back by delta, wrapping past midnight."""
+    return (datetime.combine(date(2000, 1, 1), t) - delta).time()
 
 
 class MarketScheduler:
@@ -43,7 +55,7 @@ class MarketScheduler:
         self._weekend_start = _DAY_MAP[config.weekend_start_day.lower()]
         self._weekend_end = _DAY_MAP[config.weekend_end_day.lower()]
         # UTC windows during which 'risky' signals are disabled entirely.
-        self._risky_windows = [_parse_window(w) for w in (risky_windows or [])]
+        self._risky_windows = [_risky_window(w) for w in (risky_windows or [])]
 
     def _in_session(self, start: time, now: datetime | None) -> bool:
         now_local = (now or datetime.now(UTC)).astimezone(self._tz)
@@ -73,9 +85,14 @@ class MarketScheduler:
         return self._in_session(self._stock_strip_start if stock else self._strip_start, now)
 
     def should_cancel_pending(self, now: datetime | None = None, stock: bool = False) -> bool:
-        return self.is_spread_hour(now, stock)
+        """Pendings survive late market (daily_start..sl_strip_start) — prices are still
+        tradable there, so a ladder that was already working keeps working and may fill.
+        They're pulled only at the spike, where a fill would be at a blown spread."""
+        return self.is_sl_strip_window(now, stock)
 
     def should_block_placement(self, now: datetime | None = None, stock: bool = False) -> bool:
+        """Late market is exactly the "no new exposure" window, so this one opens at
+        daily_start — the earlier of the two boundaries."""
         return self.is_spread_hour(now, stock)
 
     def is_risky_disabled(self, now: datetime | None = None) -> bool:

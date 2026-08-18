@@ -234,15 +234,40 @@ Stock suffix `-24` means 24-hour trading (permanent, not yearly). Configurable i
 **Fixed lot:** flat lot per limit, ignoring balance/SL/signal size.
 Clamped to MT5 symbol volume_min/volume_max, rounded to volume_step.
 
-## Market Hours / Spread Hour (scheduler.py)
-Pause placement + cancel pending during:
-- Mon-Thu: 3:55 PM - 6:00 PM EST
-- Weekend: Fri 3:55 PM - Sun 6:00 PM EST
+## Market Hours / Spread Hour (`bot/utils/time_utils.py`)
+The daily block is **two windows, not one**, and every gate picks the one that matches
+what it protects against:
 
-The window opens at 3:55 PM (an hour before the 5:00 PM spread spike) so late-market
-signals stop activating; the earlier 3:55–4:55 slice is a "late-market" phase (pending
-cancelled, SLs untouched). Filled-position SL stripping stays pinned to spread hour
-proper (4:55–6:00 PM, `sl_strip_start`). Cancelled orders marked `spread_cancelled` in SQLite. Re-placed automatically when markets reopen (sync cycle sees DB limit still pending + no active SQLite mapping).
+| | Late market (`daily_start`→`sl_strip_start`, 3:55–4:55 PM) | Spike (`sl_strip_start`→`daily_end`, 4:55–6:00 PM) |
+|---|---|---|
+| New orders | blocked (`should_block_placement`) | blocked |
+| Working pendings | **kept live, may fill** | cancelled (`should_cancel_pending`) |
+| Filled positions | **fully managed** — trailing, TP, follow-server TP | TP engine crypto-only |
+| Stop-losses | untouched | stripped, restored at `daily_end` |
+| Loop cadence | full speed | throttled 30s/60s |
+
+The split follows from one fact: late market is early only to stop *new* exposure ahead
+of the 5:00 PM spread spike — prices through it are still perfectly tradable. So a ladder
+that was already working keeps working, and a position that filled before 3:55 keeps
+being managed. Only the spike itself, where a fill or a market close would be at a blown
+spread, tears things down. Keying position management off the placement block instead
+(`is_spread_hour`, which spans both windows plus the whole weekend) left a position that
+filled at 3:49 sitting on a signal the TM auto-TP'd at 3:59 until 6:00 PM — the exit went
+from a winner to a manual-breakeven loss.
+
+**Friday** is the exception on the pending side (`_CycleContext.row_cancel_blocked`): with
+the market about to shut for 48h, a signal we hold **no fill on** has its ladder pulled at
+3:55 rather than carried into the gap. A signal that is already working — filled and not
+yet TP'd — keeps its remaining limits so it can still average in before the close. An
+expired signal's limits are cancelled regardless, by `_cancel_stale_pending` (they've left
+the Supabase active set), which now sees them because the gate no longer removes them from
+`ctx.sqlite_pending` first. Crypto is exempt throughout — it trades the weekend.
+
+Stocks keep a single earlier cutoff for both boundaries (3:40 PM, `stock_daily_start` /
+`sl_strip_stock_start`): the broker shuts the symbol at the 4:00 PM close and rejects
+changes past it, so the split buys them nothing. Cancelled orders are marked
+`spread_cancelled` in SQLite and re-placed automatically when markets reopen (sync cycle
+sees DB limit still pending + no active SQLite mapping).
 
 ## News Mode (per-symbol)
 `bot_mode_status.news_mode` is a comma-separated list of news tokens (NULL = no news). Tokens are currency codes (`USD`, `EUR`, `JPY`, …) plus named assets (`GOLD`), or the single token `ALL`. A token applies to an instrument when, aliased, it is a substring of the DB symbol — so `USD` gates EURUSD, USDJPY, XAUUSD, SPX500USD; `GOLD` aliases to `XAU` and gates XAUUSD only. Oil is USD-denominated but its symbol (e.g. USOILSPOT) has no `USD` substring, so `USD` news gates it via asset class. `ALL` gates everything. Crypto and 24h stocks are exempt (same as the spread gate). Parsing/matching live in `symbol_mapper.py` (`parse_news_symbols`, `instrument_under_news`).

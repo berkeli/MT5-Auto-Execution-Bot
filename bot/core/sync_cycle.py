@@ -140,7 +140,10 @@ class _CycleContext:
             return self.supabase_by_limit[lid]["instrument"]
         return db_symbol_from_mt5(row["symbol"] or "", self.config)
 
-    def is_blocked(self, instr: str, signal_type: str = "standard") -> bool:
+    def _gated(self, instr: str, signal_type: str, window) -> bool:
+        """News, volatility and risky windows block placement and tear down pendings
+        alike; only the daily spread window distinguishes the two, so it comes in as the
+        caller's `window` predicate."""
         if signal_type == "risky" and self.risky_disabled:
             return True
         if _gated_by_news_or_vol(instr, self.news_symbols, self.vol_symbols, self.config):
@@ -148,10 +151,31 @@ class _CycleContext:
         if _gate_exempt(instr, self.config):
             return False
         is_stock = detect_asset_class(instr) == AssetClass.STOCKS
-        return self.scheduler.should_cancel_pending(self.now, stock=is_stock)
+        return window(self.now, stock=is_stock)
 
-    def row_blocked(self, row) -> bool:
-        return self.is_blocked(self.instr_of(row), row["signal_type"])
+    def is_blocked(self, instr: str, signal_type: str = "standard") -> bool:
+        """Placement gate — no new exposure from daily_start (late market) on."""
+        return self._gated(instr, signal_type, self.scheduler.should_block_placement)
+
+    def cancel_blocked(self, instr: str, signal_type: str = "standard") -> bool:
+        """Teardown gate — strictly narrower in time than is_blocked: an existing ladder
+        keeps working through late market and is only pulled at the spike."""
+        return self._gated(instr, signal_type, self.scheduler.should_cancel_pending)
+
+    def row_cancel_blocked(self, row) -> bool:
+        instr, signal_type = self.instr_of(row), row["signal_type"]
+        if self.cancel_blocked(instr, signal_type):
+            return True
+        # Friday is the one day late market still tears an untouched ladder down: the
+        # market shuts for 48h, so a signal we hold nothing on doesn't get to open into
+        # the gap. A signal already working — filled, not yet TP'd — keeps its remaining
+        # limits so it can still average in before the close. An expired one is cancelled
+        # by the stale-pending sweep on its own terms, not by this gate.
+        return (
+            row["signal_id"] not in self.filled_sids
+            and self.scheduler.is_weekend_window(self.now)
+            and self.is_blocked(instr, signal_type)
+        )
 
 
 def _persist_stock_no_suffix(db_symbol: str, config: Settings) -> None:
@@ -1631,7 +1655,11 @@ class SyncCycle:
     async def _cancel_gate_blocked_pending(
         self, ctx: _CycleContext, sqlite: SQLiteDB, mt5_client: MT5Client, result: SyncResult
     ) -> None:
-        """Cancel pending orders blocked by the spread-hour / news / risky gates.
+        """Cancel pending orders blocked by the spread-spike / news / risky gates.
+
+        Narrower than the placement gate on the time axis: late market only stops new
+        orders, so a ladder already working stays live (and may legitimately fill) until
+        the spike proper. News, volatility and risky windows still cancel on contact.
 
         Blocked rows are dropped from ctx.sqlite_pending so downstream loops
         (stale-pending, SL change, offset drift) skip the just-cancelled orders.
@@ -1641,7 +1669,7 @@ class SyncCycle:
         kept: list = []
         blocked_rows: list = []
         for row in ctx.sqlite_pending:
-            (blocked_rows if ctx.row_blocked(row) else kept).append(row)
+            (blocked_rows if ctx.row_cancel_blocked(row) else kept).append(row)
         for row in blocked_rows:
             ok = await self._canceller.cancel_order(
                 row["mt5_ticket"], mt5_client, sqlite, spread=True
@@ -2212,9 +2240,11 @@ class SyncCycle:
         filled_rows: list | None = None,
     ) -> None:
         """Force-close every filled 'risky' position while a risky-disabled window is
-        active — no risky trade may stay open through the window. Mirrors the news
-        force-exit (stop trailing, close, mark closed) with capped retries. Idempotent:
-        a closed position is gone from MT5 and skipped next cycle."""
+        active — no risky trade may stay open through the window, however deep in profit.
+        The window opens _RISKY_EXIT_LEAD early (time_utils), so this sweep lands before
+        the event rather than on its edge. Mirrors the news force-exit (stop trailing,
+        close, mark closed) with capped retries. Idempotent: a closed position is gone
+        from MT5 and skipped next cycle."""
         if not scheduler.is_risky_disabled():
             return
         filled = filled_rows if filled_rows is not None else await sqlite.get_filled_positions()

@@ -444,7 +444,12 @@ class Engine:
                         self._mt5,
                         self._sqlite,
                         config,
-                        crypto_only=self._scheduler.is_spread_hour(),
+                        # Stand down only for the spread spike proper (sl_strip_start
+                        # onward), not the whole placement block. daily_start..strip is
+                        # "late market": no new orders, but prices are still tradable, so
+                        # a fill from before it must keep being managed — a server TP in
+                        # that hour has to exit then, not wait for daily_end.
+                        crypto_only=self._scheduler.is_sl_strip_window(),
                         server_tp_signals=server_tp,
                     )
                 if self._tp_finalizer is not None:
@@ -729,9 +734,11 @@ class Engine:
 
     async def _loop_interval(self, active_seconds: float) -> float:
         """Sleep for the sync/TP loops: fast while orders are active, slow when
-        idle, and throttled during spread hour when nothing needs 1s reactivity."""
+        idle, and throttled once the spread spike starts and nothing needs 1s
+        reactivity. Late market (daily_start..sl_strip_start) keeps full cadence —
+        the TP engine is still managing fills through it."""
         has_active = bool(await self._sqlite.get_all_active())
-        if self._scheduler.is_spread_hour():
+        if self._scheduler.is_sl_strip_window():
             return 30.0 if has_active else 60.0
         if has_active:
             return active_seconds
