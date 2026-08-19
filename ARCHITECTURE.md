@@ -241,9 +241,11 @@ what it protects against:
 | | Late market (`daily_start`→`sl_strip_start`, 3:55–4:55 PM) | Spike (`sl_strip_start`→`daily_end`, 4:55–6:00 PM) |
 |---|---|---|
 | New orders | blocked (`should_block_placement`) | blocked |
-| Working pendings | **kept live, may fill** | cancelled (`should_cancel_pending`) |
+| Working pendings, signal **has a fill** | **kept live, may fill** | cancelled (`should_cancel_pending`) |
+| Working pendings, signal **untouched** | pulled at 3:55 (`row_cancel_blocked`) | cancelled |
 | Filled positions | **fully managed** — trailing, TP, follow-server TP | TP engine crypto-only |
 | Stop-losses | untouched | stripped, restored at `daily_end` |
+| `breakeven` force-exit | fires | **deferred until `daily_end`** |
 | Loop cadence | full speed | throttled 30s/60s |
 
 The split follows from one fact: late market is early only to stop *new* exposure ahead
@@ -255,13 +257,27 @@ spread, tears things down. Keying position management off the placement block in
 filled at 3:49 sitting on a signal the TM auto-TP'd at 3:59 until 6:00 PM — the exit went
 from a winner to a manual-breakeven loss.
 
-**Friday** is the exception on the pending side (`_CycleContext.row_cancel_blocked`): with
-the market about to shut for 48h, a signal we hold **no fill on** has its ladder pulled at
-3:55 rather than carried into the gap. A signal that is already working — filled and not
-yet TP'd — keeps its remaining limits so it can still average in before the close. An
-expired signal's limits are cancelled regardless, by `_cancel_stale_pending` (they've left
-the Supabase active set), which now sees them because the gate no longer removes them from
-`ctx.sqlite_pending` first. Crypto is exempt throughout — it trades the weekend.
+The reprieve is for signals we are **already in**, not for untouched ones
+(`_CycleContext.row_cancel_blocked`): a signal we hold **no fill on** has its ladder pulled
+at 3:55, any day of the week. Filling in late market buys nothing — the TM cancels a fresh
+non-crypto limit hit from 4:00 PM as `late_market`, and that reason force-closes on our
+side, so the position opens only to be closed a cycle later having paid the spread. It also
+squares the two gates: `is_blocked` already says *no new exposure from 3:55*, and a fill at
+4:30 is new exposure. A signal that is already working — filled and not yet TP'd — keeps
+its remaining limits so it can still average in before the close, which is the whole point
+of the late-market reprieve. An expired signal's limits are cancelled regardless, by
+`_cancel_stale_pending` (they've left the Supabase active set), which now sees them because
+the gate no longer removes them from `ctx.sqlite_pending` first. Crypto is exempt
+throughout — it trades the weekend.
+
+**A `breakeven` force-exit is held through the spike** (`_breakeven_in_spread_spike`): we
+strip stop-losses across exactly that window so a spread blowout can't stop us out, and
+force-closing on a breakeven that arrived inside it would book the blown price the
+stripping exists to dodge. The signal's status is deliberately left unrecorded while held,
+so the exit is still pending and fires on the first cycle after `daily_end` rather than
+being swallowed. The TM no longer fires its own breakeven stop in that window either — this
+is the second lock on the same door. Crypto and 24h stocks are exempt; `cancelled` and
+manual `profit` force-exits are unaffected.
 
 Stocks keep a single earlier cutoff for both boundaries (3:40 PM, `stock_daily_start` /
 `sl_strip_stock_start`): the broker shuts the symbol at the 4:00 PM close and rejects

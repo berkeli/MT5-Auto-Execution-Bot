@@ -154,7 +154,7 @@ def test_news_still_cancels_on_contact_in_late_market() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Friday: an untouched ladder doesn't get carried into the 48h gap
+# Late market: an untouched ladder doesn't get to fill into a window the TM voids
 # ---------------------------------------------------------------------------
 
 
@@ -162,27 +162,29 @@ def _pending(signal_id: int, symbol: str = "XAUUSD") -> dict:
     return {"limit_id": signal_id, "signal_id": signal_id, "signal_type": "toll", "symbol": symbol}
 
 
-def test_friday_late_market_pulls_a_ladder_with_no_fill() -> None:
-    # Friday 16:00 EST — a weekday at this hour keeps its pendings; Friday does not.
+def test_late_market_pulls_a_ladder_with_no_fill_any_day() -> None:
+    # The TM cancels a fresh non-crypto hit from 16:00 as 'late_market' and that reason
+    # force-closes here, so a fill in this window costs the spread and nothing else.
+    # Friday and a plain Monday behave alike.
     assert _ctx(datetime(2026, 3, 6, 16, 0)).row_cancel_blocked(_pending(1)) is True
-    assert _ctx(datetime(2026, 3, 9, 16, 0)).row_cancel_blocked(_pending(1)) is False
+    assert _ctx(datetime(2026, 3, 9, 16, 0)).row_cancel_blocked(_pending(1)) is True
 
 
-def test_friday_late_market_keeps_a_working_signals_limits() -> None:
+def test_late_market_keeps_a_working_signals_limits() -> None:
     # Signal 1 is filled and hasn't TP'd — its remaining limits may still average in.
-    ctx = _ctx(datetime(2026, 3, 6, 16, 0), filled_sids={1})
+    ctx = _ctx(datetime(2026, 3, 9, 16, 0), filled_sids={1})
     assert ctx.row_cancel_blocked(_pending(1)) is False
     assert ctx.row_cancel_blocked(_pending(2)) is True
 
 
-def test_friday_teardown_still_spares_crypto() -> None:
-    ctx = _ctx(datetime(2026, 3, 6, 16, 0))
+def test_late_market_teardown_still_spares_crypto() -> None:
+    ctx = _ctx(datetime(2026, 3, 9, 16, 0))
     assert ctx.row_cancel_blocked(_pending(1, "BTCUSDT")) is False
 
 
-def test_friday_working_signal_still_loses_its_limits_at_the_spike() -> None:
+def test_working_signal_still_loses_its_limits_at_the_spike() -> None:
     # The reprieve is late market only — 16:55 pulls everything either way.
-    ctx = _ctx(datetime(2026, 3, 6, 17, 0), filled_sids={1})
+    ctx = _ctx(datetime(2026, 3, 9, 17, 0), filled_sids={1})
     assert ctx.row_cancel_blocked(_pending(1)) is True
 
 
