@@ -5,7 +5,7 @@ _PRODUCTION_LICENSE_URL: str = ""
 _PRODUCTION_UPDATE_MANIFEST_URL: str = ""
 
 MAGIC_NUMBER: int = 20250001
-BOT_VERSION: str = "1.6.8"
+BOT_VERSION: str = "1.6.9"
 
 # order_mappings.order_type values written by an instant-entry market fill. The
 # sender's own take profit rides on the broker as a hard TP, so the local TP engine
