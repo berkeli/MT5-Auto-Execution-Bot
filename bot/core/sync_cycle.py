@@ -166,16 +166,18 @@ class _CycleContext:
         instr, signal_type = self.instr_of(row), row["signal_type"]
         if self.cancel_blocked(instr, signal_type):
             return True
-        # Friday is the one day late market still tears an untouched ladder down: the
-        # market shuts for 48h, so a signal we hold nothing on doesn't get to open into
-        # the gap. A signal already working — filled, not yet TP'd — keeps its remaining
-        # limits so it can still average in before the close. An expired one is cancelled
-        # by the stale-pending sweep on its own terms, not by this gate.
-        return (
-            row["signal_id"] not in self.filled_sids
-            and self.scheduler.is_weekend_window(self.now)
-            and self.is_blocked(instr, signal_type)
-        )
+        # Late market still tears an *untouched* ladder down, any day of the week. The
+        # TM cancels a fresh non-crypto limit hit from 16:00 ET as 'late_market', and
+        # that reason force-closes on our side — so a fill in this window opens a
+        # position only to have it closed a cycle later, paying the spread for nothing.
+        # Pulling at daily_start (15:55) keeps the two bots agreeing and matches what
+        # is_blocked already says: no new exposure from here on.
+        #
+        # A signal already working — filled, not yet TP'd — keeps its remaining limits
+        # so it can still average in before the close; that is what the sl_strip_window
+        # move was after, and it is untouched. An expired one is cancelled by the
+        # stale-pending sweep on its own terms, not by this gate.
+        return row["signal_id"] not in self.filled_sids and self.is_blocked(instr, signal_type)
 
 
 def _persist_stock_no_suffix(db_symbol: str, config: Settings) -> None:
@@ -203,6 +205,24 @@ def _gate_exempt(instr: str, config: Settings) -> bool:
         ac == AssetClass.STOCKS
         and bool(config.stock_suffix)
         and map_symbol(instr, config).endswith(config.stock_suffix)
+    )
+
+
+def _breakeven_in_spread_spike(
+    signal_rows: list, scheduler: MarketScheduler, config: Settings
+) -> bool:
+    """Whether a 'breakeven' force-exit should wait for the spread spike to pass.
+
+    We strip stop-losses across this window precisely so a spread blowout can't stop
+    us out; force-closing on a breakeven that arrived inside it books the blown price
+    the stripping exists to dodge. The TM no longer fires its breakeven stop here
+    either — this is the second lock on the same door, and it also catches a stale
+    status we read late. Crypto and 24h stocks are exempt: their books stay tight.
+    """
+    return any(
+        not _gate_exempt(instr, config)
+        and scheduler.is_sl_strip_window(stock=detect_asset_class(instr) == AssetClass.STOCKS)
+        for instr in (db_symbol_from_mt5(r["symbol"] or "", config) for r in signal_rows)
     )
 
 
@@ -2111,6 +2131,20 @@ class SyncCycle:
                 continue
 
             signal_rows = [r for r in all_filled_rows if r["signal_id"] == signal_id]
+
+            # Hold a breakeven that landed inside the spread spike — see
+            # _breakeven_in_spread_spike. The status is deliberately NOT recorded, so
+            # the `previous == current` check above still sees it as pending and the
+            # exit fires on the first cycle after the window.
+            if current == "breakeven" and _breakeven_in_spread_spike(
+                signal_rows, scheduler, config
+            ):
+                logger.info(
+                    "Signal %d marked breakeven inside the SL-strip window — deferring "
+                    "the forced exit until the spike passes",
+                    signal_id,
+                )
+                continue
 
             # Cancelled status: only force-close if the cancellation is happening within
             # the forex weekend window (Fri >=15:55 EST through Sun <18:00 EST), because

@@ -69,6 +69,11 @@ def _mock_scheduler(cancel_pending=False):
     sched.should_cancel_pending.return_value = cancel_pending
     sched.should_block_placement.return_value = False
     sched.is_risky_disabled.return_value = False
+    # should_cancel_pending IS is_sl_strip_window on the real scheduler, so it tracks
+    # the same flag here. Pinning it matters: left as a bare MagicMock it is truthy,
+    # which silently puts every test inside the spread spike — SLs stripped, breakeven
+    # force-exits deferred.
+    sched.is_sl_strip_window.return_value = cancel_pending
     return sched
 
 
@@ -1976,6 +1981,61 @@ async def test_forced_exit_cancels_remaining_pending_limits(
     mock_mt5.cancel_pending_order.assert_called_once_with(9802)
     assert await sqlite_db.get_filled_positions() == []
     assert await sqlite_db.get_pending_orders() == []
+
+
+async def _run_breakeven_exit(sqlite_db, mock_mt5, sample_config, *, spike: bool) -> SyncCycle:
+    await _insert_filled(sqlite_db, mt5_ticket=9811, signal_id=1, symbol="EURUSD")
+    mock_mt5.positions_get.return_value = [make_position(ticket=9811, symbol="EURUSD")]
+    mock_mt5.close_position.return_value = make_order_result(ticket=9811)
+
+    supabase = _mock_supabase(signals=[_make_supabase_row(limit_id=9812, signal_id=1)])
+    supabase.fetch_signal_statuses.return_value = {1: {"status": "breakeven"}}
+    scheduler = _mock_scheduler(cancel_pending=spike)
+    scheduler.is_weekend_window.return_value = False
+
+    cycle = SyncCycle()
+    await cycle.run(supabase, sqlite_db, mock_mt5, sample_config, scheduler)
+    return cycle
+
+
+async def test_breakeven_force_exit_deferred_inside_the_spread_spike(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    # We strip SLs across this window so a spread blowout can't stop us out; closing on
+    # a breakeven that arrived inside it books the exact price the stripping dodges.
+    cycle = await _run_breakeven_exit(sqlite_db, mock_mt5, sample_config, spike=True)
+
+    mock_mt5.close_position.assert_not_called()
+    # The status is deliberately not recorded, so the exit is still pending and fires on
+    # the first cycle after the window rather than being swallowed.
+    assert cycle._last_signal_status.get(1) != "breakeven"
+
+
+async def test_breakeven_force_exit_fires_outside_the_spike(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    await _run_breakeven_exit(sqlite_db, mock_mt5, sample_config, spike=False)
+
+    mock_mt5.close_position.assert_called_once()
+    assert mock_mt5.close_position.call_args.kwargs["comment"] == "force_breakeven"
+
+
+async def test_breakeven_force_exit_not_deferred_for_crypto(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    # Crypto books stay tight through the spike, so it has nothing to wait for.
+    await _insert_filled(sqlite_db, mt5_ticket=9821, signal_id=1, symbol="BTCUSDT")
+    mock_mt5.positions_get.return_value = [make_position(ticket=9821, symbol="BTCUSDT")]
+    mock_mt5.close_position.return_value = make_order_result(ticket=9821)
+
+    supabase = _mock_supabase(signals=[])
+    supabase.fetch_signal_statuses.return_value = {1: {"status": "breakeven"}}
+    scheduler = _mock_scheduler(cancel_pending=True)
+    scheduler.is_weekend_window.return_value = False
+
+    await SyncCycle().run(supabase, sqlite_db, mock_mt5, sample_config, scheduler)
+
+    mock_mt5.close_position.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
