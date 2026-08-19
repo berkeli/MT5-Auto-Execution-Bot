@@ -5,7 +5,7 @@ from typing import Literal
 
 import MetaTrader5 as mt5
 
-from bot.config.constants import MAGIC_NUMBER
+from bot.config.constants import INSTANT_ENTRY_LADDER_SIZE, MAGIC_NUMBER
 from bot.db.sqlite import SQLiteDB
 from bot.db.supabase import SupabaseDB
 from bot.mt5.client import MT5Client
@@ -248,7 +248,7 @@ class OrderPlacer:
             symbol=mt5_symbol,
             channel_id=channel_id,
             sequence_number=sequence_number,
-            ladder_size=1,
+            ladder_size=INSTANT_ENTRY_LADDER_SIZE,
         )
 
         status = await supabase.fetch_signal_status(signal_id)

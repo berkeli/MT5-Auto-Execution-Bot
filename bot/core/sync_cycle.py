@@ -9,7 +9,7 @@ from pathlib import Path
 
 import MetaTrader5 as mt5
 
-from bot.config.constants import AssetClass
+from bot.config.constants import INSTANT_ENTRY_LADDER_SIZE, AssetClass
 from bot.config.settings import Settings
 from bot.db.sqlite import SQLiteDB
 from bot.db.supabase import SupabaseDB
@@ -734,11 +734,20 @@ class SyncCycle:
         # Limit-count gate: signals with too many limits have negative
         # expectancy (win size compresses as the level count grows), so they
         # are skipped at placement. Existing pendings/fills are untouched.
+        #
+        # An instant entry is measured against its assumed count, not the rows on
+        # the signal right now: its second entry appears mid-trade, so keying on
+        # the live count would place the first entry and then gate the second.
         skip_at = ctx.config.lot_sizing.skip_limits_at
         if skip_at > 0:
-            too_many = {
-                lid for lid in new_limit_ids if (by_limit[lid].get("total_limits") or 0) >= skip_at
-            }
+
+            def _limit_count(lid: int) -> int:
+                row = by_limit[lid]
+                if _is_instant(row):
+                    return INSTANT_ENTRY_LADDER_SIZE
+                return row.get("total_limits") or 0
+
+            too_many = {lid for lid in new_limit_ids if _limit_count(lid) >= skip_at}
             for lid in too_many:
                 sid = by_limit[lid]["signal_id"]
                 if sid not in self._logged_limit_skips:
@@ -747,7 +756,7 @@ class SyncCycle:
                         "Skipping signal=%d (%s): %d limits >= skip_limits_at=%d",
                         sid,
                         by_limit[lid]["instrument"],
-                        by_limit[lid].get("total_limits") or 0,
+                        _limit_count(lid),
                         skip_at,
                     )
             new_limit_ids -= too_many
@@ -777,12 +786,18 @@ class SyncCycle:
         # signal's limit rows with fresh IDENTITY ids, so a level we already filled
         # reappears under a new limit_id and slips past the limit_id check above.
         # Never re-enter a (signal_id, price) we've already filled/closed.
+        #
+        # Instant entries are exempt. An edit to one rewrites SL/TP/expiry only and
+        # never re-mints its limit ids, so the case this guards against cannot arise
+        # — while a second entry averaged in at a price the first already filled is
+        # a genuine new fill, and the most likely price for it to arrive at.
         filled_prices = await sqlite.get_filled_signal_prices()
         if filled_prices:
             refilled = {
                 lid
                 for lid in new_limit_ids
-                if any(
+                if not _is_instant(by_limit[lid])
+                and any(
                     math.isclose(float(by_limit[lid]["price_level"]), p, rel_tol=1e-9)
                     for p in filled_prices.get(by_limit[lid]["signal_id"], ())
                 )
@@ -1140,13 +1155,14 @@ class SyncCycle:
             mt5_sym = map_symbol(row0["instrument"], ctx.config)
             risky_sl = ctx.risky_sl_by_signal.get(sig_id)
             sl_for_lot = risky_sl if risky_sl is not None else float(row0["stop_loss"])
+            ladder_size = INSTANT_ENTRY_LADDER_SIZE if _is_instant(row0) else row0["total_limits"]
             signal_lots[sig_id] = lot_calc.calculate(
                 sl_for_lot,
                 all_prices,
                 mt5_sym,
                 row0["signal_type"] or "standard",
                 channel_id=row0["channel_id"],
-                ladder_size=row0["total_limits"],
+                ladder_size=ladder_size,
             )
         return signal_lots
 

@@ -12,6 +12,15 @@ BOT_VERSION: str = "1.6.7"
 # leaves these positions alone — this set is how it recognises them.
 MARKET_ORDER_TYPES: frozenset[str] = frozenset({"buy_market", "sell_market"})
 
+# Entries an instant-entry signal is sized against. The TM opens one at the market and
+# the sender may average a second in later ("add"), at a price and a time nobody can
+# know in advance — so risk is budgeted for both up front, treating the second as if it
+# came at the first's price. Sizing against the one visible entry instead would double
+# the signal's risk the moment the second arrived, since the added entry reuses its
+# filled sibling's lot. A signal that never gets its second entry simply runs at half
+# budget, which is the safe side of the guess.
+INSTANT_ENTRY_LADDER_SIZE: int = 2
+
 
 class AssetClass(str, Enum):
     FOREX = "forex"

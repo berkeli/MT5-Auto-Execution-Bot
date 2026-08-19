@@ -6,6 +6,7 @@ import pytest
 
 from bot.config.settings import ExcludedChannelAssetConfig, SymbolSuffixRule
 from bot.core.sync_cycle import SyncCycle, _feed_for_symbol
+from bot.trading.lot_calculator import LotCalculator
 from tests.conftest import (
     make_account_info,
     make_order_info,
@@ -486,6 +487,71 @@ async def test_instant_signal_kept_out_of_watch_list(sqlite_db, mock_mt5, sample
     )
 
     assert [r["limit_id"] for r in cycle.last_supabase_rows] == [2]
+
+
+async def test_instant_signal_is_sized_for_two_entries(sqlite_db, mock_mt5, sample_config) -> None:
+    # The sender may average a second entry in at any time, so the budget is split
+    # across both up front. Sizing against the one visible entry would double the
+    # signal's risk the moment the second arrived.
+    mock_mt5.account_info.return_value = make_account_info()
+    mock_mt5.order_send.return_value = make_order_result(ticket=7001)
+    mock_mt5.resolve_filling.return_value = mt5.ORDER_FILLING_IOC
+
+    cycle = SyncCycle()
+    await cycle.run(
+        _instant_supabase([_make_instant_row()]),
+        sqlite_db,
+        mock_mt5,
+        sample_config,
+        _mock_scheduler(),
+    )
+
+    calc = LotCalculator(mock_mt5, sample_config)
+    placed = mock_mt5.order_send.call_args.args[0].volume
+    assert placed == calc.calculate(1.09500, [1.10000], "EURUSD", "pa", ladder_size=2)
+    assert placed < calc.calculate(1.09500, [1.10000], "EURUSD", "pa", ladder_size=1)
+
+
+async def test_added_instant_entry_placed_at_an_already_filled_price(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    # A second entry averaged in via the TM's `add` reply arrives as a new limit on
+    # the same signal, most likely at the price the first one filled at. The
+    # already-filled-price guard exists for TM edits re-minting limit ids, which
+    # instant signals never do — so it must not swallow a genuine second fill.
+    await sqlite_db.insert_order(
+        limit_id=1,
+        signal_id=1,
+        mt5_ticket=7001,
+        order_type="buy_market",
+        lot_size=0.1,
+        placed_at="2026-01-01T00:00:00+00:00",
+        db_stop_loss=1.09500,
+        signal_type="pa",
+        feed_price=1.10000,
+    )
+    await sqlite_db.mark_filled(7001, "2026-01-01T00:00:01+00:00")
+    mock_mt5.account_info.return_value = make_account_info()
+    mock_mt5.order_send.return_value = make_order_result(ticket=7002)
+    mock_mt5.resolve_filling.return_value = mt5.ORDER_FILLING_IOC
+
+    added = _make_instant_row(limit_id=2, sequence_number=2, total_limits=2)
+
+    cycle = SyncCycle()
+    result = await cycle.run(
+        _instant_supabase([_make_instant_row(), added]),
+        sqlite_db,
+        mock_mt5,
+        sample_config,
+        _mock_scheduler(),
+    )
+
+    assert result.placed == 1
+    request = mock_mt5.order_send.call_args.args[0]
+    assert request.action == mt5.TRADE_ACTION_DEAL
+    # Reuses the filled sibling's lot, so the pair lands on the budget the first
+    # entry was sized against.
+    assert request.volume == 0.1
 
 
 async def test_tp_fired_signal_limit_not_replaced(sqlite_db, mock_mt5, sample_config) -> None:
