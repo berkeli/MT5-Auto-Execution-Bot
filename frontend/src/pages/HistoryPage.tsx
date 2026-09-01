@@ -1,10 +1,18 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { fetchHistory, clearHistory } from '../api'
 import { Seg } from '../components/Seg'
+import { PerformanceBreakdown } from '../components/PerformanceBreakdown'
 import { money } from '../utils/money'
-import { computeDetailedStats, formatHoldTime, outcomeOf } from '../utils/stats'
+import {
+  computeDetailedStats,
+  computePerformanceBreakdown,
+  formatHoldTime,
+  outcomeOf,
+} from '../utils/stats'
 import { directionFromOrderType } from '../utils/orderType'
 import { badgeClassFor, formatSignalType } from '../utils/signalType'
+import { ASSET_BASKET_LABELS, getAssetBasket } from '../utils/assetClass'
+import { getChannelLabel } from '../utils/channels'
 import type { HistoryData, SignalType, TradeData } from '../types'
 
 function todayStr(): string {
@@ -80,6 +88,8 @@ export function HistoryPage() {
   const [toDate, setToDate] = useState(todayStr)
   const [data, setData] = useState<HistoryData | null>(null)
   const [instrumentFilter, setInstrumentFilter] = useState('all')
+  const [channelFilter, setChannelFilter] = useState('all')
+  const [basketFilter, setBasketFilter] = useState('all')
   const [typeFilter, setTypeFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('closed')
   const [sortBy, setSortBy] = useState<SortKey>('newest')
@@ -120,18 +130,75 @@ export function HistoryPage() {
     return syms.sort()
   }, [allGroups])
 
+  const uniqueChannels = useMemo(() => {
+    const channels = [
+      ...new Set(allGroups.map(g => g.channelId).filter((id): id is string => !!id)),
+    ]
+    return channels.sort((a, b) => getChannelLabel(a).localeCompare(getChannelLabel(b)))
+  }, [allGroups])
+
+  const availableBaskets = useMemo(() => {
+    return [...new Set(allGroups.map(g => getAssetBasket(g.symbol)))].sort((a, b) =>
+      ASSET_BASKET_LABELS[a].localeCompare(ASSET_BASKET_LABELS[b])
+    )
+  }, [allGroups])
+
+  const analysisTrades = useMemo(() => {
+    return trades.filter(trade => {
+      if (instrumentFilter !== 'all' && trade.symbol !== instrumentFilter) return false
+      if (channelFilter !== 'all' && trade.channel_id !== channelFilter) return false
+      if (basketFilter !== 'all' && getAssetBasket(trade.symbol) !== basketFilter) return false
+      if (typeFilter !== 'all' && trade.signal_type !== typeFilter) return false
+      return true
+    })
+  }, [trades, instrumentFilter, channelFilter, basketFilter, typeFilter])
+
   const filteredGroups = useMemo(() => {
     let rows = allGroups
     if (instrumentFilter !== 'all') rows = rows.filter(g => g.symbol === instrumentFilter)
+    if (channelFilter !== 'all') rows = rows.filter(g => g.channelId === channelFilter)
+    if (basketFilter !== 'all') rows = rows.filter(g => getAssetBasket(g.symbol) === basketFilter)
     if (statusFilter !== 'all') rows = rows.filter(g => g.status === statusFilter)
     if (typeFilter !== 'all') {
       rows = rows.filter(g => g.signalType === typeFilter)
     }
     return sortGroups(rows, sortBy)
-  }, [allGroups, instrumentFilter, statusFilter, typeFilter, sortBy])
+  }, [allGroups, instrumentFilter, channelFilter, basketFilter, statusFilter, typeFilter, sortBy])
 
-  const detailedStats = useMemo(() => computeDetailedStats(trades), [trades])
-  const tradeCount = trades.filter(t => t.status === 'closed').length
+  const detailedStats = useMemo(() => computeDetailedStats(analysisTrades), [analysisTrades])
+  const tradeCount = analysisTrades.filter(t => t.status === 'closed').length
+  const channelBreakdown = useMemo(
+    () =>
+      computePerformanceBreakdown(analysisTrades, trade => ({
+        key: trade.channel_id ?? 'unknown',
+        label: getChannelLabel(trade.channel_id),
+      })),
+    [analysisTrades]
+  )
+  const basketBreakdown = useMemo(
+    () =>
+      computePerformanceBreakdown(analysisTrades, trade => {
+        const basket = getAssetBasket(trade.symbol)
+        return { key: basket, label: ASSET_BASKET_LABELS[basket] }
+      }),
+    [analysisTrades]
+  )
+  const hasReportFilters =
+    instrumentFilter !== 'all' ||
+    channelFilter !== 'all' ||
+    basketFilter !== 'all' ||
+    typeFilter !== 'all' ||
+    statusFilter !== 'closed' ||
+    sortBy !== 'newest'
+
+  function resetReportFilters() {
+    setInstrumentFilter('all')
+    setChannelFilter('all')
+    setBasketFilter('all')
+    setTypeFilter('all')
+    setStatusFilter('closed')
+    setSortBy('newest')
+  }
 
   const stat = (label: string, value: string, cls?: string, note?: string, small?: boolean) => (
     <div className="statcell">
@@ -144,9 +211,9 @@ export function HistoryPage() {
   return (
     <div className="page">
       <div>
-        <div className="eyebrow">Analytics</div>
+        <div className="eyebrow">Reporting</div>
         <h2 style={{ margin: '4px 0 0', fontSize: 24, fontWeight: 700, letterSpacing: '-0.01em' }}>
-          Trade history
+          Performance report
         </h2>
       </div>
 
@@ -154,8 +221,9 @@ export function HistoryPage() {
       <div className="panel pad">
         <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <div className="field">
-            <label>From</label>
+            <label htmlFor="history-from">From</label>
             <input
+              id="history-from"
               type="date"
               className="inp mono"
               value={fromDate}
@@ -164,8 +232,9 @@ export function HistoryPage() {
             />
           </div>
           <div className="field">
-            <label>To</label>
+            <label htmlFor="history-to">To</label>
             <input
+              id="history-to"
               type="date"
               className="inp mono"
               value={toDate}
@@ -174,8 +243,9 @@ export function HistoryPage() {
             />
           </div>
           <div className="field">
-            <label>Instrument</label>
+            <label htmlFor="history-instrument">Instrument</label>
             <select
+              id="history-instrument"
               className="inp"
               value={instrumentFilter}
               onChange={e => setInstrumentFilter(e.target.value)}
@@ -184,6 +254,38 @@ export function HistoryPage() {
               {uniqueSymbols.map(s => (
                 <option key={s} value={s}>
                   {s}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="history-basket">Basket</label>
+            <select
+              id="history-basket"
+              className="inp"
+              value={basketFilter}
+              onChange={e => setBasketFilter(e.target.value)}
+            >
+              <option value="all">All baskets</option>
+              {availableBaskets.map(basket => (
+                <option key={basket} value={basket}>
+                  {ASSET_BASKET_LABELS[basket]}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="history-channel">Channel</label>
+            <select
+              id="history-channel"
+              className="inp"
+              value={channelFilter}
+              onChange={e => setChannelFilter(e.target.value)}
+            >
+              <option value="all">All channels</option>
+              {uniqueChannels.map(channel => (
+                <option key={channel} value={channel}>
+                  {getChannelLabel(channel)}
                 </option>
               ))}
             </select>
@@ -218,8 +320,9 @@ export function HistoryPage() {
             />
           </div>
           <div className="field">
-            <label>Sort by</label>
+            <label htmlFor="history-sort">Sort by</label>
             <select
+              id="history-sort"
               className="inp"
               value={sortBy}
               onChange={e => setSortBy(e.target.value as SortKey)}
@@ -232,7 +335,12 @@ export function HistoryPage() {
             </select>
           </div>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+          {hasReportFilters && (
+            <button className="btn sm ghost" onClick={resetReportFilters}>
+              Reset filters
+            </button>
+          )}
           <button className="btn sm danger-solid" onClick={() => setConfirmClear(true)}>
             Clear history
           </button>
@@ -268,7 +376,7 @@ export function HistoryPage() {
         </div>
       )}
 
-      {/* STATISTICS — trade-level, unaffected by filters */}
+      {/* STATISTICS */}
       {trades.length > 0 && (
         <div className="panel" style={{ overflow: 'hidden' }}>
           <div className="panel-head" style={{ padding: '20px 22px 0', marginBottom: 0 }}>
@@ -356,6 +464,21 @@ export function HistoryPage() {
         </div>
       )}
 
+      {trades.length > 0 && (
+        <div className="breakdown-stack">
+          <PerformanceBreakdown
+            title="By basket"
+            subtitle="Compare the markets carrying your result"
+            rows={basketBreakdown}
+          />
+          <PerformanceBreakdown
+            title="By channel"
+            subtitle="See which signal sources are producing the edge"
+            rows={channelBreakdown}
+          />
+        </div>
+      )}
+
       {/* SIGNALS TABLE */}
       <div className="panel pad">
         <div className="panel-head">
@@ -388,6 +511,10 @@ export function HistoryPage() {
                   <td className="t-sub mono">{formatTime(g.closedAt)}</td>
                   <td>
                     <span className="sym">{g.symbol || '—'}</span>
+                    <span className="signal-origin">
+                      {ASSET_BASKET_LABELS[getAssetBasket(g.symbol)]} ·{' '}
+                      {getChannelLabel(g.channelId)}
+                    </span>
                   </td>
                   <td>
                     <span className={'tag ' + g.direction}>{g.direction}</span>

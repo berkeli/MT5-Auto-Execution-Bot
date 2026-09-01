@@ -25,6 +25,12 @@ export function getChannelName(channelId: string | null | undefined): string {
   return CHANNEL_NAMES[channelId] ?? 'Unknown'
 }
 
+export function getChannelLabel(channelId: string | null | undefined): string {
+  const name = getChannelName(channelId)
+  if (name !== 'Unknown' || !channelId) return name
+  return `Channel ${channelId.slice(-4)}`
+}
+
 export const CHANNELS: { id: string; name: string }[] = Object.entries(CHANNEL_NAMES).map(
   ([id, name]) => ({ id, name })
 )

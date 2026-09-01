@@ -51,6 +51,57 @@ function closeTime(t: TradeData): string {
   return t.closed_at || t.filled_at || t.placed_at
 }
 
+export interface PerformanceBreakdown {
+  key: string
+  label: string
+  trades: number
+  wins: number
+  losses: number
+  breakevens: number
+  winRate: number
+  netPnl: number
+  avgPnl: number
+  profitFactor: number
+  tradeShare: number
+}
+
+export function computePerformanceBreakdown(
+  trades: TradeData[],
+  groupFor: (trade: TradeData) => { key: string; label: string }
+): PerformanceBreakdown[] {
+  const closed = trades.filter(t => t.status === 'closed')
+  const groups = new Map<string, { label: string; trades: TradeData[] }>()
+
+  for (const trade of closed) {
+    const { key, label } = groupFor(trade)
+    const group = groups.get(key) ?? { label, trades: [] }
+    group.trades.push(trade)
+    groups.set(key, group)
+  }
+
+  return [...groups.entries()]
+    .map(([key, group]) => {
+      const counts = countOutcomes(group.trades)
+      const wins = group.trades.filter(t => outcomeOf(t) === 'win')
+      const losses = group.trades.filter(t => outcomeOf(t) === 'loss')
+      const grossProfit = wins.reduce((sum, trade) => sum + trade.total_pnl, 0)
+      const grossLoss = Math.abs(losses.reduce((sum, trade) => sum + trade.total_pnl, 0))
+      const netPnl = group.trades.reduce((sum, trade) => sum + trade.total_pnl, 0)
+
+      return {
+        key,
+        label: group.label,
+        trades: group.trades.length,
+        ...counts,
+        netPnl,
+        avgPnl: netPnl / group.trades.length,
+        profitFactor: grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0,
+        tradeShare: (group.trades.length / closed.length) * 100,
+      }
+    })
+    .sort((a, b) => b.netPnl - a.netPnl || b.trades - a.trades || a.label.localeCompare(b.label))
+}
+
 export function computeDetailedStats(trades: TradeData[]): DetailedStats {
   const closed = trades
     .filter(t => t.status === 'closed')
