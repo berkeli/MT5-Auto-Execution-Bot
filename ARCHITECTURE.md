@@ -77,7 +77,7 @@ TPEngine (engine.py)
 1. Most-recently-filled position (highest ticket#) moved >= `profit_threshold`
 2. Combined P&L of ALL OTHER positions for same signal >= 0
 
-### Follow Server TP (`tp_config.follow_server_tp`, off by default)
+### Follow Server TP (`tp_config.follow_server_tp`, on by default)
 Replaces both conditions above with the signal service's own call: the group takes profit
 as soon as its signal is `status='profit'` + `closed_reason='automatic'` in Supabase. Users
 whose fills or broker prices differ from the TM feed then exit *with* the alert instead of
@@ -90,6 +90,11 @@ statuses for every locally-filled signal behind the rev-gated cache, so it publi
 auto-TP'd ids on `SyncCycle.server_tp_signals` and `_tp_loop` hands that set to
 `TPEngine.run_cycle`. Manual `profit` is excluded — that path force-closes the whole
 position (see below) rather than running a TP.
+
+### Follow Server Breakeven (`tp_config.follow_server_be`, on by default)
+Controls the server `breakeven` directive independently of follow-server TP. When enabled,
+the bot force-closes filled positions and cancels the signal's remaining pending limits.
+When disabled, the directive is ignored and the trade continues under local management.
 
 ### On Trigger
 - Earlier positions: close 100% at market

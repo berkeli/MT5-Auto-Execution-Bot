@@ -119,6 +119,7 @@ class _CycleContext:
     supabase_rows: list  # active pending limits (exclusions applied)
     hit_limit_ids: set[int]  # TM-marked 'hit' limits on live signals
     profit_held_limit_ids: set[int]  # pending limits spared on profit-marked signals
+    ignored_be_limit_ids: set[int]  # pending limits spared when server BE is disabled
     supabase_by_limit: dict[int, dict]
     supabase_limit_ids: set[int]
     sqlite_limit_ids: set[int]
@@ -305,7 +306,7 @@ class SyncCycle:
         # the watermark is unavailable (legacy DB) the legacy intervals drive
         # refetching exactly as before.
         self._signals_rev: int | None = None
-        self._signal_sets_cache: tuple[list, set[int], dict[int, int]] | None = None
+        self._signal_sets_cache: tuple[list, set[int], dict[int, int], dict[int, int]] | None = None
         self._signal_sets_cache_at: float = 0.0
         self._signal_sets_cache_sids: set[int] = set()
         self._gates_cache: tuple[str | None, str | None] | None = None
@@ -439,8 +440,14 @@ class SyncCycle:
         supabase_rows = None
         hit_limit_ids: set[int] = set()
         profit_limit_signal: dict[int, int] = {}
+        breakeven_limit_signal: dict[int, int] = {}
         if signal_sets is not None:
-            supabase_rows, hit_limit_ids, profit_limit_signal = signal_sets
+            (
+                supabase_rows,
+                hit_limit_ids,
+                profit_limit_signal,
+                breakeven_limit_signal,
+            ) = signal_sets
             supabase_rows = self._apply_exclusions(supabase_rows, config)
 
             # Skipped/manual signals are dropped from the working pending set so no
@@ -464,12 +471,17 @@ class SyncCycle:
             # still hold a filled position for. The TM marking 'profit' drops the signal
             # out of the active set, but we keep its remaining entries live until our own
             # TP engine closes the trade — once we're flat the signal leaves filled_sids
-            # and the limits fall back to normal stale-cancellation. Both sets come from
-            # the single fetch_signal_sets round-trip above (its 'profit' branch is already
-            # scoped to filled_sids, so this filter is exact rather than a pruning step).
+            # and the limits fall back to normal stale-cancellation. The same scoped fetch
+            # also exposes breakeven-marked limits so they can be preserved when server BE
+            # is disabled.
             profit_held_limit_ids = {
                 lid for lid, sid in profit_limit_signal.items() if sid in filled_sids
             }
+            ignored_be_limit_ids = (
+                {lid for lid, sid in breakeven_limit_signal.items() if sid in filled_sids}
+                if not config.tp_config.follow_server_be
+                else set()
+            )
 
             # Per-symbol spread-hour / news-mode gate. Crypto and 24h stocks are exempt
             # (24/7 markets). Stocks use an earlier cutoff because they close at 16:00 EST
@@ -503,6 +515,7 @@ class SyncCycle:
                 supabase_rows=supabase_rows,
                 hit_limit_ids=hit_limit_ids,
                 profit_held_limit_ids=profit_held_limit_ids,
+                ignored_be_limit_ids=ignored_be_limit_ids,
                 supabase_by_limit=supabase_by_limit,
                 supabase_limit_ids=supabase_limit_ids,
                 sqlite_limit_ids=sqlite_limit_ids,
@@ -1428,7 +1441,7 @@ class SyncCycle:
 
     async def _fetch_signal_sets_cached(
         self, supabase: SupabaseDB, filled_sids: set[int], cache_now: float
-    ) -> tuple[list, set[int], dict[int, int]] | None:
+    ) -> tuple[list, set[int], dict[int, int], dict[int, int]] | None:
         """Active-signal fetch behind the rev-gated egress cache.
 
         The sync-state poll drops the cache whenever the signals_rev watermark
@@ -1584,9 +1597,9 @@ class SyncCycle:
         A limit the TM marked 'hit' on a still-live signal is spared: hold the
         order so a sub-pip price mismatch still fills. Genuine cancels/closes drop
         the signal out of hit_limit_ids, so those orders are still cancelled.
-        Pending limits on a 'profit'-marked signal we still hold a position for
-        are likewise spared, so the remaining entries keep filling until our own
-        TP engine closes the trade (profit_held_limit_ids).
+        Pending limits on a 'profit'-marked signal we still hold a position for are
+        likewise spared until our TP engine closes the trade. Breakeven-marked limits
+        are spared only when the user has disabled follow-server BE.
         """
         for row in ctx.sqlite_pending:
             lid = row["limit_id"]
@@ -1594,6 +1607,7 @@ class SyncCycle:
                 lid in ctx.supabase_limit_ids
                 or lid in ctx.hit_limit_ids
                 or lid in ctx.profit_held_limit_ids
+                or lid in ctx.ignored_be_limit_ids
             ):
                 continue
             ok = await self._canceller.cancel_order(
@@ -2116,6 +2130,13 @@ class SyncCycle:
             # our positions like breakeven; an auto-TP 'profit' (closed_reason "automatic")
             # leaves them open for our own TP engine to manage.
             manual_profit = current == "profit" and closed_reason == "manual"
+
+            # Keep server TP and server breakeven independently configurable. Do not
+            # record an ignored breakeven status: enabling the option while that status
+            # is still current should act on the very next cycle.
+            if current == "breakeven" and not config.tp_config.follow_server_be:
+                self._last_force_exit_status.pop(signal_id, None)
+                continue
 
             if current == "profit" and not manual_profit and previous != "profit":
                 logger.info(

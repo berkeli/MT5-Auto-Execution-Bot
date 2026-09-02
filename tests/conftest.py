@@ -33,6 +33,7 @@ def make_settings(**overrides) -> Settings:
             # follow_server_tp=False: the shipped default is now True, but most TP tests
             # exercise the local profit-threshold trigger. The follow-server tests set it True.
             follow_server_tp=False,
+            follow_server_be=True,
             partial_close_percent=50,
             forex=AssetTPConfig(
                 profit_threshold=7, threshold_unit="pips", trailing_distance=3,

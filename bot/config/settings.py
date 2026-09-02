@@ -515,6 +515,9 @@ class TPConfig(BaseModel):
     # flips to 'profit' (closed_reason 'automatic') in the DB. Only the trigger changes —
     # trailing distance, partial close %, and every other exit path stay as configured.
     follow_server_tp: bool = True
+    # When true a server breakeven call force-closes the signal's filled positions and
+    # cancels its remaining pending limits. When false the local trade stays managed.
+    follow_server_be: bool = True
     partial_close_percent: int = 50
     forex: AssetTPConfig
     forex_jpy: AssetTPConfig

@@ -50,12 +50,14 @@ def _mock_supabase(
     vol_guard=None,
     hit_limit_ids=None,
     profit_limit_ids=None,
+    breakeven_limit_ids=None,
 ):
     sb = AsyncMock()
     sb.fetch_signal_sets.return_value = (
         signals or [],
         set(hit_limit_ids or []),
         dict(profit_limit_ids or {}),
+        dict(breakeven_limit_ids or {}),
     )
     sb.fetch_live_prices.return_value = live_prices or {}
     sb.fetch_signal_statuses.return_value = {}
@@ -1983,12 +1985,29 @@ async def test_forced_exit_cancels_remaining_pending_limits(
     assert await sqlite_db.get_pending_orders() == []
 
 
-async def _run_breakeven_exit(sqlite_db, mock_mt5, sample_config, *, spike: bool) -> SyncCycle:
+async def _run_breakeven_exit(
+    sqlite_db, mock_mt5, sample_config, *, spike: bool, retain_server_limits: bool = False
+) -> SyncCycle:
     await _insert_filled(sqlite_db, mt5_ticket=9811, signal_id=1, symbol="EURUSD")
+    if retain_server_limits:
+        await sqlite_db.insert_order(
+            limit_id=9812,
+            signal_id=1,
+            mt5_ticket=9812,
+            order_type="buy_limit",
+            lot_size=0.10,
+            placed_at="2026-01-01T00:00:00+00:00",
+            db_stop_loss=1.08500,
+            signal_type="standard",
+            symbol="EURUSD",
+        )
     mock_mt5.positions_get.return_value = [make_position(ticket=9811, symbol="EURUSD")]
     mock_mt5.close_position.return_value = make_order_result(ticket=9811)
 
-    supabase = _mock_supabase(signals=[_make_supabase_row(limit_id=9812, signal_id=1)])
+    supabase = _mock_supabase(
+        signals=[] if retain_server_limits else [_make_supabase_row(limit_id=9812, signal_id=1)],
+        breakeven_limit_ids={9812: 1} if retain_server_limits else None,
+    )
     supabase.fetch_signal_statuses.return_value = {1: {"status": "breakeven"}}
     scheduler = _mock_scheduler(cancel_pending=spike)
     scheduler.is_weekend_window.return_value = False
@@ -2018,6 +2037,21 @@ async def test_breakeven_force_exit_fires_outside_the_spike(
 
     mock_mt5.close_position.assert_called_once()
     assert mock_mt5.close_position.call_args.kwargs["comment"] == "force_breakeven"
+
+
+async def test_server_breakeven_is_ignored_when_follow_be_disabled(
+    sqlite_db, mock_mt5, sample_config
+) -> None:
+    sample_config.tp_config.follow_server_tp = True
+    sample_config.tp_config.follow_server_be = False
+    cycle = await _run_breakeven_exit(
+        sqlite_db, mock_mt5, sample_config, spike=False, retain_server_limits=True
+    )
+
+    mock_mt5.close_position.assert_not_called()
+    assert {r["mt5_ticket"] for r in await sqlite_db.get_filled_positions()} == {9811}
+    assert {r["mt5_ticket"] for r in await sqlite_db.get_pending_orders()} == {9812}
+    assert cycle._last_signal_status.get(1) != "breakeven"
 
 
 async def test_breakeven_force_exit_not_deferred_for_crypto(

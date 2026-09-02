@@ -6,12 +6,10 @@
 #   - 'hit' limits to spare from stale-cancel: the TM's feed reached the level but our
 #     broker hasn't filled yet (sub-pip mismatch); a final signal status drops the
 #     signal out, so genuine cancels/closes still cancel.
-#   - every limit of a 'profit'-marked signal (no limit-status filter — marking 'profit'
-#     flips still-pending limits to 'cancelled'): mapped {limit_id: signal_id} so the
-#     caller can spare the ones it still holds while a filled position remains. Scoped to
-#     $1 (the caller's currently-filled signal ids) — the caller discards every profit row
-#     whose signal it isn't holding, so pulling the unbounded historical set (which grows
-#     forever and blew pooler egress) is pure waste. Empty array => no profit rows.
+#   - every limit of a 'profit'- or 'breakeven'-marked signal (no limit-status filter —
+#     final statuses flip still-pending limits to 'cancelled'). The caller can then spare
+#     profit limits while its TP engine finishes, or breakeven limits when server BE is
+#     disabled. Scoped to $1 (currently-filled signal ids), avoiding historical egress.
 #
 # s.take_profit and l.hit_time serve the instant-entry channels: their single limit is
 # born 'hit' at the market price the TM observed, so hit_time bounds how late we may
@@ -36,7 +34,7 @@ SELECT
 FROM signals s
 JOIN limits l ON l.signal_id = s.id
 WHERE (s.status IN ('active', 'hit') AND l.status IN ('pending', 'hit'))
-   OR (s.status = 'profit' AND s.id = ANY($1::bigint[]))
+   OR (s.status IN ('profit', 'breakeven') AND s.id = ANY($1::bigint[]))
 ORDER BY s.id, l.sequence_number
 """
 

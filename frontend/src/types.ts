@@ -91,6 +91,7 @@ export interface RiskyConfig {
 
 export interface TPConfig {
   follow_server_tp?: boolean
+  follow_server_be?: boolean
   partial_close_percent: number
   forex: AssetTPConfig
   forex_jpy: AssetTPConfig

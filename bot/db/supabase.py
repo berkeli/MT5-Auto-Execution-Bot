@@ -95,12 +95,12 @@ class SupabaseDB:
 
     async def fetch_signal_sets(
         self, held_signal_ids: list[int]
-    ) -> tuple[list[asyncpg.Record], set[int], dict[int, int]]:
-        """The three active-signal sets in one round-trip (egress guard): the
+    ) -> tuple[list[asyncpg.Record], set[int], dict[int, int], dict[int, int]]:
+        """The active-signal sets in one round-trip (egress guard): the
         active+pending rows to place, the TM-marked 'hit' limit ids to spare from
-        stale-cancel, and the {limit_id: signal_id} map for 'profit'-marked signals.
-        The 'profit' branch is scoped to held_signal_ids (the caller's currently-filled
-        signals) — every other profit row would be discarded downstream anyway.
+        stale-cancel, and {limit_id: signal_id} maps for held 'profit' and 'breakeven'
+        signals. The final-status branch is scoped to held_signal_ids because every
+        other historical row would be discarded downstream.
 
         Instant-entry limits ride in the placeable set despite being 'hit': the TM marks
         them hit the moment it records the market price it saw, so 'pending' is a state
@@ -123,7 +123,10 @@ class SupabaseDB:
         profit_limit_signal = {
             r["limit_id"]: r["signal_id"] for r in rows if r["signal_status"] == "profit"
         }
-        return active, hit_limit_ids, profit_limit_signal
+        breakeven_limit_signal = {
+            r["limit_id"]: r["signal_id"] for r in rows if r["signal_status"] == "breakeven"
+        }
+        return active, hit_limit_ids, profit_limit_signal, breakeven_limit_signal
 
     async def _fetch_sets(self, conn, held_signal_ids: list[int]) -> list[asyncpg.Record]:
         if self._signal_sets_legacy:
